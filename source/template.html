@@ -2,7 +2,7 @@
 <html lang=en>
 <head>
 <meta charset=utf-8>
-<title>Abyssal Garden</title>
+<title>The podGARDEN</title>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=theme-color content=#03131c>
 <style>
@@ -74,10 +74,9 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
   box-shadow: inset 0 -.2em #0003, 0 0 2em #19c3d6b3;
 }
 
-/* GitHub and Ko-fi: always at the bottom of the menu, in their own colours */
-#f { position: absolute; left: 0; right: 0; bottom: 1.5em; display: flex; justify-content: center; gap: 1em; font-size: .8em; }
-a + a { background: #ff5e5b; color: #fff; }
-svg { width: 1.5em; height: 1.5em; fill: currentColor; }
+/* credit line: always at the bottom of the menu, plain text with the link underlined */
+#f { position: absolute; left: 0; right: 0; bottom: 1.5em; text-align: center; font-size: .8em; color: #e8fbffb3; text-shadow: 0 1px 4px #000; }
+#f a { all: unset; cursor: pointer; color: #7ff3ff; text-decoration: underline; text-underline-offset: .2em; }
 
 /* dark plates under the dive button: detail level, list of controls, touch hint */
 #q, #k, #h { padding: 1em 1.6em; border-radius: .7em; background: #03131cb3; }
@@ -117,40 +116,73 @@ svg { width: 1.5em; height: 1.5em; fill: currentColor; }
   position: absolute; top: 1em; left: 1.2em; margin: 0; font: .8em/1.6 ui-monospace, Consolas, monospace;
   white-space: pre-wrap; text-shadow: 0 1px 4px #000; pointer-events: none;
 }
+/* the name of the podGAN you are looking at */
+#n {
+  position: absolute; bottom: 7%; left: 0; right: 0; text-align: center; font: 1.1em ui-monospace, Consolas, monospace;
+  letter-spacing: .08em; color: #e8fbff; text-shadow: 0 1px 6px #000; pointer-events: none; opacity: 0; transition: opacity .4s;
+}
+.g #n.v { opacity: .9; }
+/* game HUD: crosshair, health, messages, death notice, scores (Tab), and a red flash when hit */
+#hud { position: absolute; inset: 0; pointer-events: none; display: none; }
+.g #hud { display: block; }
+#x { position: absolute; left: 50%; top: 50%; width: 1.4em; height: 1.4em; margin: -.7em; border-radius: 50%; box-shadow: 0 0 0 2px #e8fbffcc, 0 0 6px #000; }
+#x::after { content: ''; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px; background: #e8fbff; }
+#x.on { box-shadow: 0 0 0 3px #ffe066, 0 0 10px #ffe066; }
+#itb { position: absolute; left: 0; right: 0; top: 1.2em; text-align: center; font: 800 1.1em system-ui, sans-serif; letter-spacing: .08em; color: #e8fbff; text-shadow: 0 2px 6px #000; }
+#itb.me { color: #ff6b6b; font-size: 1.5em; }
+#feed { position: absolute; right: 1.2em; top: 3.6em; text-align: right; font: .9em/1.7 ui-monospace, Consolas, monospace; color: #e8fbff; text-shadow: 0 1px 4px #000; }
+#lbl p { position: absolute; transform: translate(-50%, -100%); font: 700 .85em ui-monospace, Consolas, monospace; color: #e8fbff; text-shadow: 0 1px 4px #000; white-space: nowrap; }
+#lbl p.it { color: #ff6b6b; }
+#n.pl { color: #ffe066; }
+.hurt #hud { animation: hurt .6s; }
+@keyframes hurt { from { box-shadow: inset 0 0 12em #ff1e1ecc; } to { box-shadow: inset 0 0 12em #ff1e1e00; } }
+#sb { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); min-width: 28em; padding: 1em 1.4em; border-radius: .7em; background: #03131ce6;
+  font: .95em/1.9 ui-monospace, Consolas, monospace; color: #e8fbff; display: none; pointer-events: none; }
+#sb.v { display: block; }
+#sb p { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 1em; }
+#sb p.it { color: #ff6b6b; }
+#sb b { color: #7ff3ff; font-weight: 400; }
+#nm { padding: .8em 1em; border: 0; border-radius: .5em; background: #03131cd9; box-shadow: inset 0 0 0 2px #7ff3ff80; color: #e8fbff;
+  font: 700 1em system-ui, sans-serif; letter-spacing: .06em; text-align: center; outline: none; }
+#nm:focus { box-shadow: inset 0 0 0 2px #7ff3ff; }
+#ns { font-size: .75em; letter-spacing: .08em; color: #7ff3ff; text-wrap: balance; }
 </style>
 </head>
 <body class=l>
 <canvas id=c></canvas>
 <div id=m>
-  <h1>Abyssal Garden</h1>
+  <h1>The podGARDEN</h1>
   <div id=a>
     <div id=l><div id=p><i id=b></i></div><p id=s>Diving…</p><p id=w hidden>Use Google Chrome for optimal experience</p></div>
     <div id=g>
+      <input id=nm maxlength=16 placeholder="Your name" autocomplete=off spellcheck=false>
       <button id=d>Dive in</button>
+      <p id=ns></p>
       <p id=q><span>Detail</span><button>Low</button><button>Medium</button><button>High</button></p>
       <div id=k>
         <p>
-          <i><b>W</b><b>A</b><b>S</b><b>D</b></i>Swim
-          <i><b>Q</b><b>E</b></i>Down / up
-          <i><b>Shift</b></i>Faster
-          <i><b>1</b>–<b>6</b></i>Viewpoints
+          <i><b>Mouse</b></i>Aim
+          <i><b>Space</b></i>Jet · hold for full jets
+          <i><b>Left click</b></i>Jump into a podGAN
+          <i><b>Right click</b></i>Squirt ink
         </p>
         <p>
+          <i><b>Tab</b></i>Scores
           <i><b>Esc</b></i>Menu
           <i><b>M</b></i>Mute
           <i><b>H</b></i>Stats
         </p>
       </div>
-      <p id=h>Hold to swim forward · slide to steer · second finger to go faster</p>
+      <p id=h>Hold to jet · slide to aim</p>
     </div>
   </div>
-  <p id=f>
-    <a href=https://github.com/Noniv/abyssal-garden target=_blank><svg viewBox="0 0 16 16"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>GitHub</a>
-    <a href=https://ko-fi.com/noniv target=_blank><svg viewBox="0 0 24 24"><path fill-rule=evenodd d="M2 5h16.5a4.5 4.5 0 0 1 0 9H17a6 6 0 0 1-6 5H8a6 6 0 0 1-6-6zM17 8v3h1.5a1.5 1.5 0 0 0 0-3zM9.5 15.5 5.9 12a2.2 2.2 0 0 1 3.6-2.5 2.2 2.2 0 0 1 3.6 2.5z"/></svg>Support</a>
-  </p>
+  <p id=f>Built on <a href=https://github.com/Noniv/abyssal-garden target=_blank>Abyssal Garden</a> by Noniv · github.com/Noniv/abyssal-garden</p>
 </div>
 <button id=o aria-label=Menu>≡</button>
 <pre id=i></pre>
+<div id=n></div>
+<div id=hud><div id=lbl></div><i id=x></i><p id=itb></p><div id=feed></div></div>
+<div id=sb></div>
 <script>
 /*SCRIPT*/
 </script>

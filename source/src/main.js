@@ -108,6 +108,8 @@ const pSurf = scenePipe(mSurf, 'vs', 'fs', [], { strip: true }), pBack = scenePi
 const pBub = scenePipe(mSpr, 'vsBub', 'fsBub', [ibBub], { strip: true, blend: { color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } });
 const ADD = { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
 const pSnow = scenePipe(mSpr, 'vsSnow', 'fsSnow', [ibSnow], { strip: true, blend: ADD });
+const pPod = scenePipe(mod(W_POD), 'vs', 'fs', [{ arrayStride: 32, stepMode: 'instance', attributes: [A(0, 0, 'float32x4'), A(1, 16, 'float32x4')] }], { cull: 'front' });
+const pSwarm = scenePipe(mod(W_SWARM), 'vs', 'fs', [{ arrayStride: 48, stepMode: 'instance', attributes: [A(0, 0, 'float32x4'), A(1, 16, 'float32x4'), A(2, 32, 'float32x4')] }], { cull: 'front' });
 const pGl = scenePipe(mLeaf, 'vsGl', 'fsGl', [ibBub], { strip: true, blend: ADD, constants: { ROWS: 7 } });
 const pSolidSh = shadowPipe(mSolid, 'vs', [vbSolid, ibSolid]), pTerrSh = shadowPipe(mSolid, 'vs', [vbSolid, ibSolid], { cull: 'front' });
 const pLeafSh = shadowPipe(mLeaf, 'vs', [ibLeaf], { strip: true, constants: { ROWS: 3 } });
@@ -119,7 +121,9 @@ const waterViews = [0, 1, 2, 3, 4].map((m) => tWater.createView({ baseMipLevel: 
 const waterBG = waterViews.map((v) => blitBG(v));
 const waterPass = waterViews.map((v) => ({ colorAttachments: [colorAtt(v, true)] }));
 
-const mRays = mod(W_RAYS), mPost = mod(W_POST), mRB = mod(W_RBLUR);
+const mRays = mod(W_RAYS), mPost = mod(W_POST), mRB = mod(W_RBLUR), mVox = mod(W_VOX);
+const NINK = 16, inkBuf = device.createBuffer({ size: (1 + NINK * 2) * 16, usage: BU.UNIFORM | BU.COPY_DST }), inkArr = new Float32Array((1 + NINK * 2) * 4);
+const pVox = device.createRenderPipeline({ layout: 'auto', vertex: { module: mVox, entryPoint: 'vs' }, fragment: { module: mVox, entryPoint: 'fs', targets: [{ format: HDR }] } });
 const pRB = device.createRenderPipeline({ layout: 'auto', vertex: { module: mRB, entryPoint: 'vs' }, fragment: { module: mRB, entryPoint: 'fs', targets: [{ format: HDR }] } });
 const pRays = device.createRenderPipeline({ layout: 'auto', vertex: { module: mRays, entryPoint: 'vs' }, fragment: { module: mRays, entryPoint: 'fs', targets: [{ format: HDR }] } });
 const pPost = device.createRenderPipeline({ layout: 'auto', vertex: { module: mPost, entryPoint: 'vs' }, fragment: { module: mPost, entryPoint: 'fs', targets: [{ format: FMT }] } });
@@ -269,6 +273,36 @@ for (const p of POSES) flyPts.push([p[0], -40, p[2]]);
 await say('Growing kelp…', 0.73, 2500);
 const Wd = makeWorld(D, T, flyPts, POSES);
 for (const p of POSES) p[1] += Wd.gy(p[0], p[2]);
+// three podGANs floating in a row a few metres in front of the first viewpoint: x, y, z, cell size; phase, which one
+const PODS = new Float32Array(3 * 8);
+{
+  const [x, y, z, tx, , tz] = POSES[0], l = hypot(tx - x, tz - z), dx = (tx - x) / l, dz = (tz - z) / l;
+  [[5, -2.4], [5.6, 0], [5, 2.4]].forEach(([d, s], k) => {
+    const px = x + dx * d - dz * s, pz = z + dz * d + dx * s;
+    PODS.set([px, max(y - 0.4, Wd.gy(px, pz) + 0.5), pz, 0.09, k * 1.7, k, 0, 0], k * 8);
+  });
+}
+// the swarm: NPOD podGANs scattered through open water, a few dozen near the first viewpoint
+const SW = { P: new Float32Array(NPOD * 3), V: new Float32Array(NPOD * 3), H: new Float32Array(NPOD * 3), O: new Float32Array(NPOD * 3),
+  U: new Float32Array(NPOD * 3), L: new Float32Array(NPOD * 3), ph: new Float32Array(NPOD), cn: new Float32Array(NPOD), roam: new Float32Array(NPOD), g: [],
+  pc: new Uint16Array(NPOD), E: new Float32Array(NPOD * 3), own: new Int8Array(NPOD).fill(-1) }; // pulse count, correction still to apply, player inside
+{
+  const [x0, , z0] = POSES[0];
+  for (let i = 0; i < NPOD; i++) {
+    const G = podGenome(i); SW.g.push(G);
+    let x = 0, y = -20, z = 0;
+    for (let t = 0; t < 40; t++) {
+      if (i < 48) { const a = Math.random() * 6.283, r = 6 + Math.random() * 26; x = x0 + cos(a) * r; z = z0 + sin(a) * r; }
+      else { const a = Math.random() * 6.283, r = 140 * sqrt(Math.random()); x = cos(a) * r; z = sin(a) * r; }
+      const f = Wd.gy(x, z), top = min(f + 14, -3);
+      y = f + 1.5 + Math.random() * max(top - f - 1.5, 0);
+      if (sdAt(x, y, z) < -0.95) break;
+    }
+    SW.P.set([x, y, z], i * 3); SW.O.set([x, y, z], i * 3);
+    const a = Math.random() * 6.283; SW.H.set([cos(a), 0, sin(a)], i * 3); SW.U.set([0, 1, 0], i * 3); SW.L.set([cos(a), 0, sin(a)], i * 3);
+    SW.ph[i] = Math.random(); SW.roam[i] = 8 + Math.random() * 14;
+  }
+}
 D = Wd.gy = T.smp = null; // with gy goes the generator's working memory (about 200 MB)
 
 await say('Building set pieces…', 0.94, 1200);
@@ -293,6 +327,9 @@ const ibSolids = buf(solidData, BU.VERTEX);
 const ibChunk = Wd.chunks.map((c) => buf(c.data, BU.VERTEX)), ibProp = Wd.props.map((c) => buf(c.data, BU.VERTEX));
 const ibBig = buf(new Uint8Array(Wd.big.buf), BU.VERTEX), ibBigF = buf(new Uint8Array(Wd.bigF.buf), BU.VERTEX), ibSmall = buf(new Uint8Array(Wd.small.buf), BU.VERTEX);
 const ibFish = buf(Wd.fish, BU.VERTEX), ibManta = buf(Wd.mantas, BU.VERTEX), ibBubbles = buf(Wd.bubbles, BU.VERTEX), ibSnowB = buf(Wd.snow, BU.VERTEX);
+const ibPods = buf(PODS, BU.VERTEX);
+const ibSwarm = device.createBuffer({ size: NPOD * 48, usage: BU.VERTEX | BU.COPY_DST }), swBuf = new Float32Array(NPOD * 12);
+let nSwarm = 0;
 const ibGl = buf(Wd.glints, BU.VERTEX), nGl = Wd.glints.length / 8;
 const nFish = Wd.fish.length / 8, nManta = Wd.mantas.length / 8, nBub = Wd.bubbles.length / 8, nSnow = Wd.snow.length / 4;
 const MANTA = meshes[12], FISH = meshes[13];
@@ -332,7 +369,7 @@ Wd.glints = Wd.volD = Wd.gm = T.vb = T.ib = T.wp = T.wn = 0;
 // for 60 fps; both start where the last visit left them.
 const PIXMAX = 2560 * 1440, PIXMIN = mob ? 25e4 : 5e5, DETMIN = 0.4;
 let W = 0, H = 0, DW = 0, DH = 0, pix = +SV[1] || (LV > 1 ? 41e4 : mob ? 1280 * 720 : PIXMAX), det = +SV[2] || 1, dynN = 0, dynT = 0, dynG = 0, dynGN = 0, dynBad = 0, dynOk = 0, dynWait = 3;
-let passScene, passRays, passBlur, bgBlur, passPost, bgRays, bgPost, bloomPass = [], bloomBG = [], targets = [];
+let passScene, passVox, bgVox, passRays, passBlur, bgBlur, passPost, bgRays, bgPost, bloomPass = [], bloomBG = [], targets = [];
 const NB = 6;
 function resize() {
   DW = max(2, round(canvas.clientWidth * devicePixelRatio)); DH = max(2, round(canvas.clientHeight * devicePixelRatio));
@@ -345,24 +382,27 @@ function resize() {
   for (const t of targets) t.destroy();
   const tMS = tex(AA > 1 ? W : 1, H, HDR, TU.RENDER_ATTACHMENT, { samples: AA }), tDp = tex(W, H, DEPTH, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING, { samples: AA });
   const tRes = tex(W, H, HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING), tRay = tex(W / 2, H / 2, HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING), tRay2 = tex(W / 2, H / 2, HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING);
-  targets = [tMS, tDp, tRes, tRay, tRay2];
+  const tVox = tex(W, H, HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING);
+  targets = [tMS, tDp, tRes, tRay, tRay2, tVox];
   const bl = [];
   for (let i = 0; i < NB; i++) { const t = tex(max(1, W >> (i + 1)), max(1, H >> (i + 1)), HDR, TU.RENDER_ATTACHMENT | TU.TEXTURE_BINDING); bl.push(t); targets.push(t); }
-  const vDp = tDp.createView(), vRes = tRes.createView(), vRay = tRay.createView(), vRay2 = tRay2.createView(), vBl = bl.map((t) => t.createView());
+  const vDp = tDp.createView(), vRes = tRes.createView(), vVox = tVox.createView(), vRay = tRay.createView(), vRay2 = tRay2.createView(), vBl = bl.map((t) => t.createView());
   // without anti-aliasing (Low) the scene goes straight into the resolve target, and tMS is one unused column
   passScene = { colorAttachments: [{ view: AA > 1 ? tMS.createView() : vRes, resolveTarget: AA > 1 ? vRes : undefined, loadOp: 'clear', storeOp: AA > 1 ? 'discard' : 'store', clearValue: [0, 0, 0, 1] }],
     depthStencilAttachment: { view: vDp, depthClearValue: 0, depthLoadOp: 'clear', depthStoreOp: 'store' } };
+  passVox = { colorAttachments: [colorAtt(vVox, true)] };
+  bgVox = device.createBindGroup({ layout: pVox.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: vRes }, { binding: 2, resource: vDp }, { binding: 3, resource: { buffer: inkBuf } }] });
   passRays = { colorAttachments: [colorAtt(vRay, true)] };
   passBlur = { colorAttachments: [colorAtt(vRay2, true)] };
   bgBlur = device.createBindGroup({ layout: pRB.getBindGroupLayout(0), entries: [{ binding: 0, resource: vRay }] });
   passPost = { colorAttachments: [{ view: null, loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 1] }] };
   bgRays = device.createBindGroup({ layout: pRays.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: sRep }, { binding: 2, resource: sCmp },
     { binding: 3, resource: tShadow.createView() }, { binding: 4, resource: tWater.createView() }, { binding: 5, resource: vDp }, { binding: 6, resource: tVol.createView() }, { binding: 7, resource: sClamp }] });
-  bgPost = device.createBindGroup({ layout: pPost.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: sClamp }, { binding: 2, resource: vRes },
+  bgPost = device.createBindGroup({ layout: pPost.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: ubo } }, { binding: 1, resource: sClamp }, { binding: 2, resource: vVox },
     { binding: 3, resource: vRay2 }, { binding: 4, resource: vBl[0] }, { binding: 5, resource: vDp }] });
   bloomPass = []; bloomBG = [];
   // down: res -> b0 -> ... -> b5 ; up: b5 -> b4 (additive) ... -> b0
-  for (let i = 0; i < NB; i++) { bloomPass.push({ colorAttachments: [colorAtt(vBl[i], true)] }); bloomBG.push(blitBG(i ? vBl[i - 1] : vRes)); }
+  for (let i = 0; i < NB; i++) { bloomPass.push({ colorAttachments: [colorAtt(vBl[i], true)] }); bloomBG.push(blitBG(i ? vBl[i - 1] : vVox)); }
   for (let i = NB - 1; i > 0; i--) { bloomPass.push({ colorAttachments: [colorAtt(vBl[i - 1], false)] }); bloomBG.push(blitBG(vBl[i])); }
   UB[52] = W; UB[53] = H; UB[54] = 1 / W; UB[55] = 1 / H;
 }
@@ -389,7 +429,9 @@ if (hasTS) {
 
 // ---------------------------------------------------------------- frame
 let hud = false;
-let kf = 0, kb = 0, kl = 0, kr = 0, ku = 0, kd = 0, ks = 0, mdx = 0, mdy = 0, lkx = 0, lky = 0, l2x = 0, l2y = 0, hN = 0, hMax = 0, hMin = 1e9, hPer = 1e9, hLate = 0, hTot = 0, tId = -1, tN = 0, tx0 = 0, ty0 = 0, tx = 0, ty = 0;
+let kj = 0, kf = 0, kb = 0, kl = 0, kr = 0, ku = 0, kd = 0, ks = 0, mdx = 0, mdy = 0, lkx = 0, lky = 0, l2x = 0, l2y = 0, hN = 0, hMax = 0, hMin = 1e9, hPer = 1e9, hLate = 0, hTot = 0, tId = -1, tN = 0, tx0 = 0, ty0 = 0, tx = 0, ty = 0;
+// voxel edge length in metres (V toggles the voxel look)
+const VOXEL = 0.2; let voxOn = true;
 const TANH = 0.6, NEAR = 0.1, EXPO = 0.62, RAYS = 0.54;
 const submitList = [null];
 const rowOrd = new Uint8Array(CELLS);
@@ -440,8 +482,11 @@ function render() {
   const zx = cx - PURPLE[0], zz = cz - PURPLE[1]; let zt = (44 - sqrt(zx * zx + zz * zz)) / 18; zt = zt < 0 ? 0 : zt > 1 ? 1 : zt;
   m[51] = zt * zt * (3 - 2 * zt);
   let ek = (-cy - 8) / 26; ek = ek < 0 ? 0 : ek > 1 ? 1 : ek;
-  m[56] = EXPO * (0.6 + 0.4 * ek); m[57] = RAYS; m[58] = det;
+  m[56] = EXPO * (0.6 + 0.4 * ek); m[57] = RAYS; m[58] = det; m[59] = voxOn ? VOXEL : 0;
   Q.writeBuffer(ubo, 0, UB);
+  packSwarm();
+  labels();
+  Q.writeBuffer(inkBuf, 0, inkData());
   WT[0] = F[TIME]; Q.writeBuffer(uboW, 0, WT);
 
   { let cr = floor((cz - OZ) / CELLW) | 0; cr = cr < 0 ? 0 : cr > CELLS - 1 ? CELLS - 1 : cr; let n = 0; rowOrd[n++] = cr; for (let d = 1; d < CELLS; d++) { if (cr - d >= 0) rowOrd[n++] = cr - d; if (cr + d < CELLS) rowOrd[n++] = cr + d; } }
@@ -477,12 +522,16 @@ function render() {
   r.setPipeline(pLeaf5); drawCells(r, Wd.big.start, Wd.big.lo, Wd.big.hi, 5, false, 10, 24, 58);
   r.setPipeline(pLeafF); r.setVertexBuffer(0, ibBigF); drawCells(r, Wd.bigF.start, Wd.bigF.lo, Wd.bigF.hi, 5, false, 6, 58, 150);
   r.setPipeline(pLeafS); r.setVertexBuffer(0, ibSmall); drawCells(r, Wd.small.start, Wd.small.lo, Wd.small.hi, 1.5, false, 6, 0, 70);
+  r.setPipeline(pPod); r.setVertexBuffer(0, ibPods); r.draw(36, 3);
+  if (nSwarm) { r.setPipeline(pSwarm); r.setVertexBuffer(0, ibSwarm); r.draw(36, nSwarm); }
   r.setPipeline(pSurf); r.draw(4);
   r.setPipeline(pBack); r.draw(4);
   r.setPipeline(pBub); r.setVertexBuffer(0, ibBubbles); r.draw(4, nBub);
   r.setPipeline(pGl); r.setVertexBuffer(0, ibGl); r.draw(4, nGl);
   r.setPipeline(pSnow); r.setVertexBuffer(0, ibSnowB); r.draw(4, nSnow);
   r.end();
+  // rebuild the image out of voxels
+  r = e.beginRenderPass(passVox); r.setPipeline(pVox); r.setBindGroup(0, bgVox); r.draw(3); r.end();
   // light shafts
   r = e.beginRenderPass(passRays); r.setPipeline(pRays); r.setBindGroup(0, bgRays); r.draw(3); r.end();
   r = e.beginRenderPass(passBlur); r.setPipeline(pRB); r.setBindGroup(0, bgBlur); r.draw(3); r.end();
@@ -528,6 +577,353 @@ function collide() {
   }
 }
 
+// Distance to the rock (metres, < 0 in water, clamped to ±1) anywhere the collision field covers; a function
+// declaration so the world generator can use it before the code below has run.
+function sdAt(x, y, z) {
+  x = (x - OX) / VS - CO; y = (y - OY) / VS; z = (z - OZ) / VS - CO;
+  if (!(x >= 0 && z >= 0 && y >= 4 && x < CN * 4 - 1 && z < CN * 4 - 1 && y < NY - 5)) return -1;
+  const v = (x, y, z) => { const b = CI[(x >> 2) + CN * ((y >> 2) + NY / 4 * (z >> 2))]; return b > 1 ? CG[b * 64 - 128 + (x & 3) + 4 * (y & 3) + 16 * (z & 3)] : b * 254 - 127; };
+  const ix = x | 0, iy = y | 0, iz = z | 0, u = x - ix, w = y - iy, a = v(ix, iy, iz), b = v(ix, iy + 1, iz), c = v(ix, iy, iz + 1), d = v(ix, iy + 1, iz + 1);
+  const p = a + (v(ix + 1, iy, iz) - a) * u, q = b + (v(ix + 1, iy + 1, iz) - b) * u, r = c + (v(ix + 1, iy, iz + 1) - c) * u, s = d + (v(ix + 1, iy + 1, iz + 1) - d) * u;
+  const e = p + (q - p) * w; return (e + (r + (s - r) * w - e) * (z - iz)) / 127;
+}
+// Cephalopod swimming. Each podGAN works in jet pulses: it contracts (body narrows, legs draw in) for the first
+// 55% of a pulse, squirts over the next 15%, then glides with its legs trailing while drag slows it. At the start of
+// each pulse it picks a new heading: a random turn, pulled back toward home when it strays, away from rock, the
+// surface and the swimmer. Its body leans into its motion, legs behind, and its face turns to you when you are close.
+function swim(dt) {
+  const { P, V, H, O, U, L, ph, cn, roam, g } = SW, cx = F[CX], cy = F[CY], cz = F[CZ];
+  for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
+    if (SW.own[i] >= 0) continue; // a player is swimming this one
+    const G = g[i];
+    let px = P[j], py = P[j + 1], pz = P[j + 2], vx = V[j], vy = V[j + 1], vz = V[j + 2], hx = H[j], hy = H[j + 1], hz = H[j + 2];
+    let p = ph[i] + dt / G.per;
+    if (p >= 1) {
+      p -= 1; const q = SW.pc[i] = (SW.pc[i] + 1) & 65535, rn = (k) => ih(i * 7919 + q, k) - 0.5; // same turns for every player
+      let ox = O[j] - px, oy = O[j + 1] - py, oz = O[j + 2] - pz; const od = hypot(ox, oy, oz) + 1e-6, pull = od > roam[i] ? 1.4 * od / roam[i] : 0.25;
+      hx += rn(0) * 1.4 + ox / od * pull; hy += rn(1) * 0.7 + oy / od * pull + (py > -5 ? -0.8 : 0); hz += rn(2) * 1.4 + oz / od * pull;
+      const tx = px - cx, ty = py - cy, tz = pz - cz, td = hypot(tx, ty, tz);
+      if (td < 4) { hx += tx / td; hy += ty / td; hz += tz / td; } // startled by the swimmer
+      hy *= 0.6; const l = hypot(hx, hy, hz) + 1e-6; hx /= l; hy /= l; hz /= l;
+    }
+    ph[i] = p;
+    cn[i] = p < 0.55 ? 0.5 - 0.5 * cos(p / 0.55 * PI) : p < 0.7 ? 1 - (p - 0.55) / 0.15 : 0;
+    if (p >= 0.55 && p < 0.7) { const a = G.jet * dt / (0.15 * G.per); vx += hx * a; vy += hy * a; vz += hz * a; }
+    const dr = Math.exp(-1.6 * dt); vx *= dr; vy *= dr; vz *= dr;
+    // keep out of the rock: push back along the distance gradient and turn the heading off the wall
+    const s = sdAt(px, py, pz);
+    if (s > -0.9) {
+      let gx = sdAt(px + 0.4, py, pz) - sdAt(px - 0.4, py, pz), gy = sdAt(px, py + 0.4, pz) - sdAt(px, py - 0.4, pz), gz = sdAt(px, py, pz + 0.4) - sdAt(px, py, pz - 0.4);
+      const gl = hypot(gx, gy, gz);
+      if (gl > 1e-4) {
+        gx /= gl; gy /= gl; gz /= gl; const k = (s + 0.9) * 8 * dt;
+        vx -= gx * k; vy -= gy * k; vz -= gz * k;
+        const hd = hx * gx + hy * gy + hz * gz; if (hd > 0) { hx -= gx * hd * 1.2; hy -= gy * hd * 1.2; hz -= gz * hd * 1.2; const l = hypot(hx, hy, hz) + 1e-6; hx /= l; hy /= l; hz /= l; }
+      }
+    }
+    px += vx * dt; py += vy * dt; pz += vz * dt;
+    { const E = SW.E, k = min(1, dt * 3); px += E[j] * k; py += E[j + 1] * k; pz += E[j + 2] * k; E[j] -= E[j] * k; E[j + 1] -= E[j + 1] * k; E[j + 2] -= E[j + 2] * k; }
+    if (py > -1.8) { py = -1.8; vy = min(vy, 0); }
+    const rr = hypot(px, pz); if (rr > 150) { px *= 150 / rr; pz *= 150 / rr; }
+    P[j] = px; P[j + 1] = py; P[j + 2] = pz; V[j] = vx; V[j + 1] = vy; V[j + 2] = vz; H[j] = hx; H[j + 1] = hy; H[j + 2] = hz;
+    // body axis: upright when still, leaning into the motion (legs trailing) when fast
+    const sp = hypot(vx, vy, vz) + 1e-6, t = min(sp / 1.2, 1) * 0.8;
+    let ux = vx / sp * t, uy = (1 - t) + vy / sp * t, uz = vz / sp * t; let l = hypot(ux, uy, uz) + 1e-6;
+    const ku = min(1, dt * 3);
+    ux = U[j] + (ux / l - U[j]) * ku; uy = U[j + 1] + (uy / l - U[j + 1]) * ku; uz = U[j + 2] + (uz / l - U[j + 2]) * ku; l = hypot(ux, uy, uz) + 1e-6;
+    U[j] = ux / l; U[j + 1] = uy / l; U[j + 2] = uz / l;
+    // where the face looks: at you when you are within 14 m, otherwise the way it is heading
+    let lx = cx - px, ly = cy - py, lz = cz - pz; const ld = hypot(lx, ly, lz);
+    if (ld < 14) { lx /= ld; ly /= ld; lz /= ld; } else { const hl = hypot(hx, hz) + 1e-6; lx = hx / hl; ly = 0; lz = hz / hl; }
+    const kl = min(1, dt * 2);
+    L[j] += (lx - L[j]) * kl; L[j + 1] += (ly - L[j + 1]) * kl; L[j + 2] += (lz - L[j + 2]) * kl;
+  }
+}
+// Packs the podGANs in view (and within fog range) into the instance buffer, and names the one you look at.
+function packSwarm() {
+  const { P, U, L, cn, g } = SW, cx = F[CX], cy = F[CY], cz = F[CZ], fx = F[FX], fy = F[FY], fz = F[FZ], rx = F[RX], rz = F[RZ], ux = F[UX], uy = F[UY], uz = F[UZ];
+  const far = 85 * det, tx = TANH * W / H; let n = 0;
+  for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
+    const dx = P[j] - cx, dy = P[j + 1] - cy, dz = P[j + 2] - cz, d = hypot(dx, dy, dz), G = g[i], r = G.size * 26;
+    if (d > far + r) continue;
+    const z = dx * fx + dy * fy + dz * fz;
+    if (z < -r || abs(dx * rx + dz * rz) - r > z * tx + r || abs(dx * ux + dy * uy + dz * uz) - r > z * TANH + r) continue;
+    // the face direction must not be parallel to the body axis
+    let qx = L[j], qy = L[j + 1], qz = L[j + 2]; const ud = qx * U[j] + qy * U[j + 1] + qz * U[j + 2];
+    if (hypot(qx - U[j] * ud, qy - U[j + 1] * ud, qz - U[j + 2] * ud) < 0.2) { qx = -U[j + 2]; qy = 0; qz = U[j]; if (abs(qx) + abs(qz) < 1e-3) qx = 1; }
+    const o = n * 12;
+    swBuf[o] = P[j]; swBuf[o + 1] = P[j + 1]; swBuf[o + 2] = P[j + 2]; swBuf[o + 3] = G.size;
+    swBuf[o + 4] = U[j]; swBuf[o + 5] = U[j + 1]; swBuf[o + 6] = U[j + 2]; swBuf[o + 7] = i;
+    swBuf[o + 8] = qx; swBuf[o + 9] = qy; swBuf[o + 10] = qz; swBuf[o + 11] = cn[i];
+    n++;
+  }
+  nSwarm = n;
+  if (n) Q.writeBuffer(ibSwarm, 0, swBuf, 0, n * 12);
+}
+
+// ============================================================================ the game: podGAN tag
+// You are a podGAN: one of the swarm, seen from behind and above. The mouse aims; tap Space for one squid jet,
+// hold it for full jets. Right-click squirts a 5 m cloud of ink. Left-click jumps you into the podGAN in the middle
+// of your view. With friends (opened from the server, server/server.mjs) it's tag: one of you is IT, and only IT can
+// jump into a body another player is in, which makes them IT. Fewest seconds as IT wins. Opened as a file, you swim
+// alone and can body-hop as you like.
+const NET = { ws: null, id: -1, host: true, online: false, it: -1, players: new Map(), sendT: 0, podT: 0, itTime: 0, tags: 0 };
+const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: 0, tgt: -1, jumpT: 0 };
+const inks = []; // { x, y, z, t, seed }
+const feedEl = $('feed'), nsEl = $('ns'), nmEl = $('nm'), tagEl = $('n'), itEl = $('itb'), lblEl = $('lbl');
+try { nmEl.value = localStorage.podName || ''; } catch {}
+const pname = (id) => id === NET.id ? 'you' : NET.players.get(id)?.name || `podGAN ${id + 1}`;
+const podName = (i) => `${SW.g[i].name} · #${String(i).padStart(4, '0')}`;
+function feed(msg) {
+  const e = document.createElement('p'); e.textContent = msg; feedEl.prepend(e);
+  while (feedEl.children.length > 5) feedEl.lastChild.remove();
+  setTimeout(() => e.remove(), 6000);
+}
+function flash() { body.classList.remove('hurt'); void body.offsetWidth; body.classList.add('hurt'); }
+const esc = (t) => String(t).replace(/[<&]/g, '');
+function drawScores() {
+  const rows = [[NET.id, nmEl.value || 'you', NET.itTime, NET.tags], ...[...NET.players].map(([id, p]) => [id, p.name, p.itTime || 0, p.tags || 0])].sort((a, b) => a[2] - b[2]);
+  $('sb').innerHTML = `<p><b>podGAN</b><b>Time as IT</b><b>Tags</b></p>` + rows.map(([id, n, t, k]) =>
+    `<p${id === NET.it ? ' class=it' : ''}><span>${esc(n)}${id === NET.id ? ' (you)' : ''}${id === NET.it ? ' · IT' : ''}</span><span>${t} s</span><span>${k}</span></p>`).join('');
+}
+function drawIt() {
+  const me = NET.online && NET.it === NET.id;
+  itEl.textContent = !NET.online ? '' : NET.it < 0 ? 'Waiting for another podGAN to play tag' : me ? "You're IT! Jump into another player" : `${pname(NET.it)} is IT`;
+  itEl.className = me ? 'me' : '';
+}
+// move into podGAN i (snap: put the camera there at once, otherwise it flies over)
+function become(i, snap) {
+  const { own, P, V, H } = SW, o = PL.pod;
+  if (o >= 0 && own[o] === (NET.online ? NET.id : 0)) {
+    own[o] = -1; // the old body goes back to the wild, heading the way it was going
+    const j = o * 3, l = hypot(V[j], V[j + 1], V[j + 2]); if (l > 0.1) { H[j] = V[j] / l; H[j + 1] = V[j + 1] / l * 0.6; H[j + 2] = V[j + 2] / l; }
+  }
+  PL.pod = i; own[i] = NET.online ? NET.id : 0; PL.snap = !!snap; PL.pt = -1;
+  // face the way the new body faces
+  const j = i * 3; F[YAW] = atan2(SW.L[j], -SW.L[j + 2]); F[PIT] = -0.6;
+  if (!snap) feed(`You are now a ${SW.g[i].name}`);
+}
+// --- networking
+const status = (m) => { nsEl.textContent = m; };
+function netStart() {
+  if (!/^https?:$/.test(location.protocol)) { status('Swimming alone. To play tag with friends, open the game from your podGARDEN server.'); return; }
+  const u = new URLSearchParams(location.search).get('server') || location.host;
+  status('Connecting to the server…');
+  const ws = NET.ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + u + '/ws');
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = (e) => { if (typeof e.data !== 'string') podFix(e.data); else netMsg(JSON.parse(e.data)); };
+  ws.onclose = () => {
+    const was = NET.online; NET.online = false; NET.host = true; NET.it = -1;
+    for (const p of NET.players.values()) if (SW.own[p.pod] === p.id) SW.own[p.pod] = -1;
+    NET.players.clear(); drawIt();
+    if (PL.pod >= 0) SW.own[PL.pod] = 0;
+    if (NET.full) return;
+    status(was ? 'Lost the server. Reconnecting…' : 'No server here. Retrying…'); setTimeout(netStart, 3000);
+  };
+}
+const netSend = (m) => { if (NET.online && NET.ws.readyState === 1) NET.ws.send(typeof m === 'string' || m instanceof ArrayBuffer ? m : JSON.stringify(m)); };
+function netName() { const n = nmEl.value.trim(); try { localStorage.podName = n; } catch {} if (n) netSend({ t: 'name', name: n }); }
+const countMsg = () => status(`Online · ${NET.players.size + 1} of 8 podGANs${NET.host ? ' · your browser hosts the swarm' : ''}`);
+const addP = (p) => { NET.players.set(p.id, { ...p, tp: null }); SW.own[p.pod] = p.id; };
+function netMsg(m) {
+  const P = NET.players, own = SW.own;
+  switch (m.t) {
+    case 'full': NET.full = true; status('The server is full (8 podGANs). Swimming alone.'); break;
+    case 'hi': {
+      NET.online = true; NET.id = m.id; NET.host = m.host === m.id; NET.it = m.it; P.clear(); own.fill(-1);
+      for (const p of m.players) if (p.id !== m.id) addP(p);
+      const mine = m.players.find((p) => p.id === m.id);
+      PL.pod = -1; become(mine.pod, true); netName(); countMsg(); drawIt();
+      break;
+    }
+    case 'join': addP(m.p); feed(`${m.p.name} swam in`); countMsg(); break;
+    case 'bye': feed(`${pname(m.id)} left`); if (own[m.i] === m.id) own[m.i] = -1; P.delete(m.id); countMsg(); break;
+    case 'name': { const p = P.get(m.id); if (p) p.name = m.name; break; }
+    case 'host': NET.host = m.id === NET.id; countMsg(); break;
+    case 'it': NET.it = m.id; drawIt(); if (m.id === NET.id) { feed("You're IT!"); flash(); } break;
+    case 'score':
+      for (const [id, t, k] of m.s) { if (id === NET.id) { NET.itTime = t; NET.tags = k; } else { const p = P.get(id); if (p) { p.itTime = t; p.tags = k; } } }
+      if ($('sb').className) drawScores();
+      break;
+    case 's': { const p = P.get(m.id); if (!p || m.i !== p.pod) break; p.tp = m; break; }
+    case 'ink': addInk(m.p[0], m.p[1], m.p[2]); break;
+    case 'no': feed(m.why); break;
+    case 'own': // someone moved into a wild podGAN
+      if (m.id === NET.id) become(m.i, false);
+      else { const p = P.get(m.id); if (p) { if (own[m.from] === m.id) own[m.from] = -1; p.pod = m.i; p.tp = null; own[m.i] = m.id; } }
+      break;
+    case 'tag': { // m.by jumped into m.v's body; m.v was thrown into wild podGAN m.vi and is IT now
+      NET.it = m.v;
+      const pb = P.get(m.by), pv = P.get(m.v);
+      if (own[m.from] === m.by) own[m.from] = -1;
+      if (m.by === NET.id) { own[m.i] = -1; become(m.i, false); feed(`You tagged ${pname(m.v)}! They're IT`); }
+      else if (pb) { pb.pod = m.i; pb.tp = null; own[m.i] = m.by; }
+      if (m.v === NET.id) { become(m.vi, true); feed(`${pname(m.by)} tagged you! You're IT`); flash(); }
+      else if (pv) { pv.pod = m.vi; pv.tp = null; own[m.vi] = m.v; if (m.by !== NET.id) feed(`${pname(m.by)} tagged ${pname(m.v)}`); }
+      drawIt();
+      break;
+    }
+  }
+}
+// wild swarm corrections: the host sends every podGAN's position, velocity, heading, pulse phase and count twice a second
+const POD_REC = 10; // int16s per podGAN
+function podSend() {
+  const a = new Int16Array(NPOD * POD_REC), { P, V, H, ph, pc } = SW;
+  for (let i = 0; i < NPOD; i++) {
+    const o = i * POD_REC, j = i * 3;
+    a[o] = P[j] * 64; a[o + 1] = P[j + 1] * 64; a[o + 2] = P[j + 2] * 64;
+    a[o + 3] = V[j] * 256; a[o + 4] = V[j + 1] * 256; a[o + 5] = V[j + 2] * 256;
+    a[o + 6] = H[j] * 32000; a[o + 7] = H[j + 1] * 32000; a[o + 8] = H[j + 2] * 32000;
+    a[o + 9] = (round(ph[i] * 255) & 255) | ((pc[i] & 255) << 8);
+  }
+  netSend(a.buffer);
+}
+function podFix(buf) {
+  if (NET.host || buf.byteLength !== NPOD * POD_REC * 2) return;
+  const a = new Int16Array(buf), { P, V, H, ph, pc, E, own } = SW;
+  for (let i = 0; i < NPOD; i++) {
+    if (own[i] >= 0) continue; // players' bodies come from their own messages
+    const o = i * POD_REC, j = i * 3;
+    // the position error is blended in over a moment, the rest is taken as it is
+    E[j] = a[o] / 64 - P[j]; E[j + 1] = a[o + 1] / 64 - P[j + 1]; E[j + 2] = a[o + 2] / 64 - P[j + 2];
+    if (E[j] * E[j] + E[j + 1] * E[j + 1] + E[j + 2] * E[j + 2] > 100) { P[j] += E[j]; P[j + 1] += E[j + 1]; P[j + 2] += E[j + 2]; E[j] = E[j + 1] = E[j + 2] = 0; }
+    V[j] = a[o + 3] / 256; V[j + 1] = a[o + 4] / 256; V[j + 2] = a[o + 5] / 256;
+    H[j] = a[o + 6] / 32000; H[j + 1] = a[o + 7] / 32000; H[j + 2] = a[o + 8] / 32000;
+    const w = a[o + 9] & 65535; ph[i] = (w & 255) / 255; pc[i] = (pc[i] & ~255) | (w >> 8);
+  }
+}
+// --- controls
+function jetTap() { if (PL.pt < 0 || PL.pt > 0.25) { PL.pt = 0; PL.kicked = false; } }
+// the middle of the view: the podGAN whose body the aim passes closest to, nearest first
+function aimAt() {
+  const { P, U, g } = SW, cx = F[CX], cy = F[CY], cz = F[CZ], fx = F[FX], fy = F[FY], fz = F[FZ];
+  let best = -1, bt = 45;
+  for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
+    if (i === PL.pod) continue;
+    const s = g[i].size, dx = P[j] + U[j] * s * 8 - cx, dy = P[j + 1] + U[j + 1] * s * 8 - cy, dz = P[j + 2] + U[j + 2] * s * 8 - cz;
+    const t = dx * fx + dy * fy + dz * fz;
+    if (t < 0.5 || t > bt) continue;
+    const px = dx - fx * t, py = dy - fy * t, pz = dz - fz * t, r = s * 9 + t * 0.015;
+    if (px * px + py * py + pz * pz < r * r) { best = i; bt = t; }
+  }
+  return best;
+}
+function jump() {
+  const i = PL.tgt;
+  if (i < 0 || F[TIME] - PL.jumpT < 0.4) return;
+  PL.jumpT = F[TIME];
+  if (!NET.online) { become(i, false); return; }
+  const o = SW.own[i];
+  if (o >= 0 && o !== NET.id && NET.it !== NET.id) { feed('Only IT can jump into another player'); return; }
+  netSend({ t: 'jump', i });
+}
+function addInk(x, y, z) { inks.push({ x, y, z, t: 0, seed: Math.random() * 100 }); if (inks.length > NINK) inks.shift(); }
+function squirt() {
+  if (PL.pod < 0 || F[TIME] - PL.inkT < 3) return;
+  PL.inkT = F[TIME];
+  const j = PL.pod * 3, s = SW.g[PL.pod].size, x = SW.P[j] - F[FX] * 1.5, y = SW.P[j + 1] + s * 8 - F[FY] * 1.5, z = SW.P[j + 2] - F[FZ] * 1.5;
+  addInk(x, y, z);
+  netSend({ t: 'ink', p: [+x.toFixed(2), +y.toFixed(2), +z.toFixed(2)] });
+}
+// ink clouds for the voxel pass: centre + half-size (grows to 2.5 m in 1.2 s), then thickness (fades over the last 3 s)
+function inkData() {
+  let n = 0;
+  for (const c of inks) {
+    const h = 2.5 * min(c.t / 1.2, 1), th = min(1, (10 - c.t) / 3);
+    if (th <= 0) continue;
+    inkArr.set([c.x, c.y, c.z, max(h, 0.3), th, c.seed, 0, 0], 4 + n * 8); n++;
+  }
+  inkArr[0] = n;
+  return inkArr;
+}
+// swims your podGAN and places the camera behind and above it
+function pilot(dt) {
+  for (let k = inks.length - 1; k >= 0; k--) if ((inks[k].t += dt) > 10) inks.splice(k, 1);
+  const i = PL.pod; if (i < 0) return;
+  const { P, V, U, L, cn } = SW, j = i * 3, s = SW.g[i].size;
+  const cp = cos(F[PIT]), fx = cp * sin(F[YAW]), fy = sin(F[PIT]), fz = -cp * cos(F[YAW]);
+  let vx = V[j], vy = V[j + 1], vz = V[j + 2];
+  // a tap: draw in for 0.18 s, then one jet. Held: full jets, pulsing
+  const hold = kj || (tId >= 0 && !menu); PL.hold = hold ? PL.hold + dt : 0;
+  let c = cn[i] * exp(-dt * 6);
+  if (PL.pt >= 0) {
+    PL.pt += dt;
+    if (PL.pt >= 0.18 && !PL.kicked) { PL.kicked = true; vx += fx * 4.5; vy += fy * 4.5; vz += fz * 4.5; }
+    c = PL.pt < 0.18 ? PL.pt / 0.18 : max(0, 1 - (PL.pt - 0.18) / 0.17);
+    if (PL.pt > 0.35) PL.pt = -1;
+  }
+  if (PL.hold > 0.25) { const a = 11 * dt; vx += fx * a; vy += fy * a; vz += fz * a; c = 0.5 + 0.5 * sin(F[TIME] * 16); }
+  cn[i] = c;
+  const dr = exp(-1.3 * dt); vx *= dr; vy *= dr; vz *= dr;
+  let px = P[j], py = P[j + 1], pz = P[j + 2];
+  const sd = sdAt(px, py + s * 8, pz);
+  if (sd > -0.6) { // bump off the rock
+    let gx = sdAt(px + 0.4, py + s * 8, pz) - sdAt(px - 0.4, py + s * 8, pz), gy = sdAt(px, py + s * 8 + 0.4, pz) - sdAt(px, py + s * 8 - 0.4, pz), gz = sdAt(px, py + s * 8, pz + 0.4) - sdAt(px, py + s * 8, pz - 0.4);
+    const gl = hypot(gx, gy, gz);
+    if (gl > 1e-4) { gx /= gl; gy /= gl; gz /= gl; const vn = vx * gx + vy * gy + vz * gz; if (vn > 0) { vx -= gx * vn * 1.5; vy -= gy * vn * 1.5; vz -= gz * vn * 1.5; } px -= gx * (sd + 0.6) * min(1, dt * 10); py -= gy * (sd + 0.6) * min(1, dt * 10); pz -= gz * (sd + 0.6) * min(1, dt * 10); }
+  }
+  px += vx * dt; py += vy * dt; pz += vz * dt;
+  if (py > -1.8) { py = -1.8; vy = min(vy, 0); }
+  const rr = hypot(px, pz); if (rr > 150) { px *= 150 / rr; pz *= 150 / rr; }
+  P[j] = px; P[j + 1] = py; P[j + 2] = pz; V[j] = vx; V[j + 1] = vy; V[j + 2] = vz;
+  // body leans into the motion, legs trailing; the face looks where you aim
+  const sp = hypot(vx, vy, vz) + 1e-6, t = min(sp / 1.5, 1) * 0.8;
+  let ux = vx / sp * t, uy = (1 - t) + vy / sp * t, uz = vz / sp * t; let l = hypot(ux, uy, uz) + 1e-6;
+  const ku = min(1, dt * 4);
+  ux = U[j] + (ux / l - U[j]) * ku; uy = U[j + 1] + (uy / l - U[j + 1]) * ku; uz = U[j + 2] + (uz / l - U[j + 2]) * ku; l = hypot(ux, uy, uz) + 1e-6;
+  U[j] = ux / l; U[j + 1] = uy / l; U[j + 2] = uz / l;
+  L[j] = fx; L[j + 1] = fy; L[j + 2] = fz;
+  // camera: behind and above (the aim starts 35 degrees down), flying over after a jump, pulled in by rock
+  const tx = px + U[j] * s * 8, ty = py + U[j + 1] * s * 8, tz = pz + U[j + 2] * s * 8, kc = PL.snap ? 1 : min(1, dt * 6);
+  PL.cx += (tx - PL.cx) * kc; PL.cy += (ty - PL.cy) * kc; PL.cz += (tz - PL.cz) * kc; PL.snap = false;
+  let D = 1.2 + s * 28;
+  for (let d = 0.4; d < D; d += 0.25) if (sdAt(PL.cx - fx * d, PL.cy - fy * d, PL.cz - fz * d) > -0.25) { D = max(d - 0.25, 0.3); break; }
+  F[CX] = PL.cx - fx * D; F[CY] = min(PL.cy - fy * D, -1); F[CZ] = PL.cz - fz * D;
+  PL.tgt = aimAt();
+  // what's in the middle of the view
+  if (PL.tgt >= 0) {
+    const o = SW.own[PL.tgt], pl = o >= 0 && o !== (NET.online ? NET.id : 0) ? NET.players.get(o) : null;
+    tagEl.textContent = pl ? `${pl.name}${o === NET.it ? ' · IT' : ''} · ${NET.it === NET.id ? 'click to tag!' : 'a player'}` : `${podName(PL.tgt)} · click to jump in`;
+    tagEl.className = 'v' + (pl ? ' pl' : '');
+  } else tagEl.className = '';
+  $('x').className = PL.tgt >= 0 ? 'on' : '';
+}
+function game(dt) {
+  // other players' podGANs glide toward what they last reported
+  const { P, V, U, L, cn } = SW, k = min(1, dt * 10);
+  for (const p of NET.players.values()) {
+    const m = p.tp; if (!m || SW.own[p.pod] !== p.id) continue;
+    const j = p.pod * 3;
+    for (let a = 0; a < 3; a++) { m.p[a] += m.v[a] * dt; P[j + a] += (m.p[a] - P[j + a]) * k; V[j + a] = m.v[a]; U[j + a] += (m.u[a] - U[j + a]) * k; L[j + a] += (m.l[a] - L[j + a]) * k; }
+    cn[p.pod] = m.c;
+  }
+  if (!NET.online) return;
+  if ((NET.sendT -= dt) <= 0 && PL.pod >= 0) {
+    NET.sendT = 1 / 15;
+    const j = PL.pod * 3, f = (a, n) => [+a[j].toFixed(n), +a[j + 1].toFixed(n), +a[j + 2].toFixed(n)];
+    netSend({ t: 's', p: f(P, 2), v: f(V, 2), u: f(U, 3), l: f(L, 3), c: +cn[PL.pod].toFixed(2) });
+  }
+  if (NET.host && (NET.podT -= dt) <= 0) { NET.podT = 0.5; podSend(); }
+}
+// floating names over the other players' podGANs (IT in red)
+const lbls = [];
+function labels() {
+  let n = 0;
+  const cx = F[CX], cy = F[CY], cz = F[CZ], asp = W / H;
+  for (const [id, p] of NET.players) {
+    if (SW.own[p.pod] !== id) continue;
+    const j = p.pod * 3, s = SW.g[p.pod].size, x = SW.P[j] + SW.U[j] * s * 22 - cx, y = SW.P[j + 1] + SW.U[j + 1] * s * 22 - cy, z0 = SW.P[j + 2] + SW.U[j + 2] * s * 22 - cz;
+    const z = x * F[FX] + y * F[FY] + z0 * F[FZ]; if (z < 0.5 || z > 90) continue;
+    const sx = (x * F[RX] + z0 * F[RZ]) / (z * TANH * asp), sy = (x * F[UX] + y * F[UY] + z0 * F[UZ]) / (z * TANH);
+    if (abs(sx) > 1.1 || abs(sy) > 1.1) continue;
+    let e = lbls[n]; if (!e) { e = lbls[n] = document.createElement('p'); lblEl.append(e); }
+    e.textContent = p.name + (id === NET.it ? ' · IT' : ''); e.className = id === NET.it ? 'it' : '';
+    e.style.left = `${(sx * 0.5 + 0.5) * 100}%`; e.style.top = `${(0.5 - sy * 0.5) * 100}%`; e.style.display = '';
+    n++;
+  }
+  for (let k = n; k < lbls.length; k++) lbls[k].style.display = 'none';
+}
+
 function frame(now) {
   requestAnimationFrame(frame);
   const dtr = now - F[LAST]; F[LAST] = now;
@@ -563,14 +959,11 @@ function frame(now) {
     const ax = lkx * kq, ay = lky * kq; lkx -= ax; lky -= ay; l2x += ax; l2y += ay;
     const dyw = l2x * kq, dpt = l2y * kq; l2x -= dyw; l2y -= dpt;
     const yaw = F[YAW] + dyw; let pitch = F[PIT] - dpt; pitch = pitch < -1.55 ? -1.55 : pitch > 1.55 ? 1.55 : pitch;
-    const sp = ks || tN > 1 ? 26 : 7, k = 1 - exp(-dt * 4.5), mf = tId >= 0 ? 0.7 : kf - kb, mr = kr - kl, mu = ku - kd, cp = cos(pitch), sy = sin(yaw), cw = cos(yaw);
-    const vx = F[VX] + ((sy * cp * mf + cw * mr) * sp - F[VX]) * k, vy = F[VY] + ((sin(pitch) * mf + mu) * sp - F[VY]) * k, vz = F[VZ] + ((-cw * cp * mf + sy * mr) * sp - F[VZ]) * k;
-    let x = F[CX] + vx * dt, y = F[CY] + vy * dt, z = F[CZ] + vz * dt;
-    const rad = sqrt(x * x + z * z); if (rad > 150) { x *= 150 / rad; z *= 150 / rad; }
-    y = y < -52 ? -52 : y > -1.2 ? -1.2 : y;
-    F[YAW] = yaw; F[PIT] = pitch; F[VX] = vx; F[VY] = vy; F[VZ] = vz; F[MX] = x - F[CX]; F[MY] = y - F[CY]; F[MZ] = z - F[CZ];
-    collide();
+    F[YAW] = yaw; F[PIT] = pitch > 1.45 ? 1.45 : pitch < -1.45 ? -1.45 : pitch;
   }
+  swim(dt);
+  pilot(dt);
+  game(dt);
   render();
   if (hud) {
     hN++; if (dtr > hMax) hMax = dtr; if (dtr < hMin) hMin = dtr; if (dtr > hPer * 1.5) { hLate++; hTot++; }
@@ -584,18 +977,26 @@ const key = (e, v) => {
   switch (e.code) {
     case 'KeyW': kf = v; break; case 'KeyS': kb = v; break; case 'KeyA': kl = v; break; case 'KeyD': kr = v; break;
     case 'KeyE': ku = v; break; case 'KeyQ': kd = v; break; case 'ShiftLeft': case 'ShiftRight': ks = v; break;
+    case 'Space': if (v && !e.repeat) jetTap(); kj = v; break;
     default: if (v && !e.repeat) {
       if (e.code === 'KeyH') { hud = !hud; hTot = 0; hPer = 1e9; info.textContent = ''; }
       else if (e.code === 'KeyM') mute();
+      else if (e.code === 'KeyV') voxOn = !voxOn;
       else if (e.code === 'Escape') ui(true);
-      else if (e.code >= 'Digit1' && e.code <= 'Digit6') lookAt(...POSES[e.code.charCodeAt(5) - 49]);
     }
   }
 };
 // behind the menu only the stats and mute keys work
-addEventListener('keydown', (e) => { if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1); });
+addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') { if (e.code === 'Enter') go(); return; }
+  if (e.code === 'Tab') { e.preventDefault(); if (!menu) $('sb').className = 'v'; drawScores(); return; }
+  if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1);
+});
+addEventListener('keyup', (e) => { if (e.code === 'Tab') $('sb').className = ''; });
+addEventListener('mousedown', (e) => { if (menu || document.pointerLockElement !== canvas) return; if (e.button === 0) jump(); else if (e.button === 2) squirt(); });
+addEventListener('contextmenu', (e) => { if (!menu) e.preventDefault(); });
 addEventListener('keyup', (e) => key(e, 0));
-const release = () => { kf = kb = kl = kr = ku = kd = ks = 0; tId = -1; tN = 0; };
+const release = () => { kf = kb = kl = kr = ku = kd = ks = kj = 0; tId = -1; tN = 0; };
 const capture = () => { sound(); const p = canvas.requestPointerLock({ unadjustedMovement: true }); if (p && p.catch) p.catch(() => canvas.requestPointerLock()).catch(() => 0); };
 canvas.addEventListener('click', capture);
 addEventListener('mousemove', (e) => { if (document.pointerLockElement === canvas) { mdx += e.movementX; mdy += e.movementY; } });
@@ -624,6 +1025,7 @@ const ui = (m) => {
   if (m) { release(); setTimeout(() => menu && bDive.focus(), 100); } else document.activeElement.blur();
 };
 const go = () => {
+  netName();
   sound(); ui(false); bDive.textContent = 'Resume';
   // phones: go fullscreen and ask for landscape; where that is refused the CSS rotation still applies
   if (mob) document.documentElement.requestFullscreen?.()?.then(() => screen.orientation.lock('landscape')).catch(() => 0);
@@ -636,6 +1038,8 @@ document.addEventListener('pointerlockchange', () => ui(!document.pointerLockEle
 
 // draw the first frame and wait for the GPU to finish it (pipelines get compiled on first use) before the reveal
 lookAt(...POSES[0]);
+become(floor(Math.random() * 48), true);
+netStart();
 await say('Letting the light in…', 1, 400);
 render(); await Q.onSubmittedWorkDone();
 setTimeout(keep, 15e3, 'abyssalLoad', ''); // the load counts as survived after 15 s of frames

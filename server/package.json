@@ -1,0 +1,8 @@
+{
+  "name": "podgarden-server",
+  "private": true,
+  "description": "Multiplayer server for The podGARDEN: serves the game and relays up to 8 players",
+  "type": "module",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "ws": "^8.18.0" }
+}

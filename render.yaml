@@ -1,0 +1,11 @@
+# Render Blueprint for The podGARDEN multiplayer server (https://render.com/docs/blueprint-spec)
+# The server (server/server.mjs) serves the built game, ./index.html, and runs the game over WebSockets at /ws.
+services:
+  - type: web
+    name: podgarden
+    runtime: node
+    plan: free
+    buildCommand: cd server && npm install
+    startCommand: node server/server.mjs
+    healthCheckPath: /status
+    autoDeploy: true

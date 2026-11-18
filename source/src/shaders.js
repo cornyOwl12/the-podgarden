@@ -739,6 +739,474 @@ const W_RBLUR = W_FS + /*wgsl*/`
 `;
 
 // ---------------------------------------------------------------- final composite
+// ---------------------------------------------------------------- podGANs: morphing voxel creatures with many eyes
+// Each podGAN is a box; its fragment shader walks the box's own grid of cells (POD_G, cell size a.w) and builds the
+// creature cell by cell from a few rules, re-rolled 10 times a second like the frames of a GIF: the body stretches
+// and squashes, the number of eyes follows the width, the pupils look around, colours cycle and edges flicker.
+// It writes alpha -8 so the voxel pass leaves it alone (it already is voxels, finer than the world's).
+const W_POD = S_B + /*wgsl*/`
+const POD_G = vec3f(24., 24., 8.);
+const PIV = vec3f(12., 0., 4.);
+// per podGAN: 3 body colours, an accent (arms, legs), then the face colour
+const PAL = array<vec3f, 15>(
+  vec3f(.06, .07, .72), vec3f(.30, .07, .72), vec3f(.72, .06, .56), vec3f(.06, .50, .20), vec3f(.04, .10, .60),
+  vec3f(.75, .68, .02), vec3f(.58, .66, .04), vec3f(.82, .62, .03), vec3f(.04, .16, .62), vec3f(.01, .22, .04),
+  vec3f(.72, .04, .30), vec3f(.25, .09, .72), vec3f(.04, .42, .30), vec3f(.80, .12, .04), vec3f(.10, .30, .40));
+// base half-width (cells), how far it stretches, eye rows
+const SHAPE = array<vec3f, 3>(vec3f(6.5, 2.5, 2.), vec3f(4.5, 1.5, 2.), vec3f(6., 3., 3.));
+struct VO { @builtin(position) cp: vec4f, @location(0) wp: vec3f, @location(1) @interpolate(flat) a: vec4f, @location(2) @interpolate(flat) b: vec4f };
+fn hh(x: f32) -> f32 { return fract(sin(x * 91.17 + 3.1) * 43758.5453); }
+fn pbase(a: vec4f, b: vec4f) -> vec3f { return a.xyz + vec3f(0., sin(g.cam.w * .9 + b.x) * .12, 0.); }
+// turned to face the camera, with a slow sway
+fn pyaw(p: vec3f, b: vec4f) -> f32 { let d = g.cam.xyz - p; return atan2(d.x, d.z) + sin(g.cam.w * .6 + b.x) * .35; }
+fn roty(v: vec3f, y: f32) -> vec3f { let c = cos(y); let s = sin(y); return vec3f(c * v.x + s * v.z, v.y, -s * v.x + c * v.z); }
+const CUBE = array<u32, 36>(0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5);
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f) -> VO {
+  let k = CUBE[vi];
+  let l = vec3f(f32(k & 1u), f32((k >> 1u) & 1u), f32(k >> 2u)) * POD_G;
+  let p = pbase(a, b);
+  var o: VO;
+  o.wp = p + roty((l - PIV) * a.w, pyaw(p, b));
+  o.cp = g.vp * vec4f(o.wp, 1.);
+  o.a = a; o.b = b;
+  return o;
+}
+// what fills cell c: rgb, and w = 0 empty, 1 body, 2 eye white, 3 pupil
+fn cell(c: vec3f, id: i32, ph: f32) -> vec4f {
+  let tq = floor((g.cam.w + ph) * 10.) * .1; // 10 frames a second
+  let fr = floor((g.cam.w + ph) * 10.);
+  let sh = SHAPE[id];
+  let m = sin(tq * TAU / 5.5 + f32(id) * 2.1);
+  let hw = round(sh.x + m * sh.y);                       // half-width in cells
+  let rows = select(2., sh.z, hw < sh.x);                // a squashed-tall one can fit a third row of eyes
+  let yb = 9.; let yt = min(yb + 4. + rows * 4. + round(-m * 2.), 23.);
+  // now and then a glitch frame shifts whole rows sideways
+  let glitch = step(.94, hh(floor(tq * 2.) + f32(id) * 17.));
+  let cx = c.x - 12. + .5 + glitch * round((hh(c.y + fr) - .5) * 4.);
+  let ax = abs(cx);
+  let pal = id * 5;
+  let tone = fract(cx / (hw * 2.) + c.y * .035 + tq * .12 + f32(id) * .3) * 3.;
+  let ci = i32(tone) % 3;
+  let body = PAL[pal + ci];
+  // body: a block with a rounded top, flickering edges, front at z = 6
+  if (c.y >= yb && c.y < yt) {
+    let dt = yt - 1. - c.y;
+    var ins = select(select(0., 1., dt == 1.), 2., dt == 0.) + select(0., 1., c.y == yb);
+    ins += step(.88, hh(c.y * 7.1 + fr + f32(id)));
+    let edge = ax > hw - ins - 1.;
+    if (ax < hw - ins && c.z >= 1. && c.z <= 6. && !(edge && (c.z == 1. || c.z == 6.))) {
+      // the face on the front: a frame around the grid of eyes
+      let top = yt - 3.;
+      let ry = floor((top - c.y) / 4.);
+      let nm = max(1., floor((2. * hw - 1.) / 4.));
+      if (c.z == 6. && c.y <= top + 1. && c.y >= top - rows * 4. + 1. && ax <= nm * 2. + .5) {
+        let n = max(1., nm - select(0., 1., ry == 0. && hh(f32(id) + 5.) > .5 && hw > 5.));
+        let ex = cx + n * 2. - .5;                         // 0 at the left edge of the eye row
+        let col = floor(ex / 4.); let lx = ex - col * 4.; let ly = (top - c.y) - ry * 4.;
+        if (ry >= 0. && col >= 0. && col < n && lx < 3. && ly < 3.) { return vec4f(1.); } // eye socket: the eye sticks out
+        return vec4f(PAL[pal + 4], 1.);
+      }
+      // a band of colour along the top of the head
+      let topc = PAL[pal + select(select(3, 0, id == 1), 2, id == 0)];
+      return vec4f(select(body, topc, dt <= 1.), 1.);
+    }
+  }
+  // eyes, one cell proud of the face, with a pupil that looks around
+  if (c.z == 7. && c.y >= yb && c.y < yt) {
+    let top = yt - 3.; let ry = floor((top - c.y) / 4.);
+    let dt = yt - 1. - c.y;
+    if (ry >= 0. && ry < rows && c.y <= top && ax < hw - select(0., 1., dt <= 1.)) {
+      let n = max(1., floor((2. * hw - 1.) / 4.) - select(0., 1., ry == 0. && hh(f32(id) + 5.) > .5 && hw > 5.));
+      let ex = cx + n * 2. - .5;
+      let col = floor(ex / 4.); let lx = ex - col * 4.; let ly = (top - c.y) - ry * 4.;
+      if (col >= 0. && col < n && lx < 3. && ly < 3.) {
+        let e = col + ry * 7. + f32(id) * 31.; let lk = floor(tq / 1.6 + hh(e) * 3.);
+        let pp = vec2f(floor(hh(e + lk) * 2.99), floor(hh(e + lk + .5) * 2.99));
+        let blink = step(.97, hh(e + floor(tq * 4.)));
+        if ((lx == pp.x && ly == pp.y) || (blink > 0. && ly == 1.)) { return vec4f(vec3f(.01), 3.); }
+        return vec4f(vec3f(.9), 2.);
+      }
+    }
+  }
+  // arms: stubs out of the sides
+  if (c.z >= 3. && c.z <= 4.) {
+    let ay = c.y - yb - 3.;
+    if (ay >= 0. && ay <= 4. && ay % 2. == 0. && ax >= hw - 1. && ax < hw + 1. + floor(hh(ay + sign(cx) + fr * .3) * 2.5)) {
+      return vec4f(PAL[pal + 3], 1.);
+    }
+    // legs: every other column under the body, wriggling
+    let lc = floor(c.x / 2.);
+    if (c.y < yb && i32(c.x) % 2 == 0 && ax < hw - 1.) {
+      let L = 4. + floor(hh(lc + f32(id) * 13.) * 4.) + floor(hh(lc + fr * .5) * 2.);
+      if (c.y >= yb - L) { return vec4f(PAL[pal + select((i32(lc) + i32(tq * 3.)) % 3, 3, (i32(lc) + i32(tq * 3.)) % 4 == 3)], 1.); }
+    }
+  }
+  return vec4f(0.);
+}
+struct FO { @location(0) c: vec4f, @builtin(frag_depth) d: f32 };
+@fragment fn fs(i: VO) -> FO {
+  let p = pbase(i.a, i.b); let y = pyaw(p, i.b); let s = i.a.w; let id = i32(i.b.y);
+  let rd = normalize(i.wp - g.cam.xyz);
+  let ro = roty(g.cam.xyz - p, -y) / s + PIV;
+  let rl = roty(rd, -y);
+  let r = select(rl, vec3f(1e-6), abs(rl) < vec3f(1e-6));
+  let t1 = (vec3f(0.) - ro) / r; let t2 = (POD_G - ro) / r;
+  let tn = min(t1, t2); let tf = max(t1, t2);
+  let t0 = max(max(max(tn.x, tn.y), tn.z), 0.); let tx = min(min(tf.x, tf.y), tf.z);
+  if (t0 >= tx) { discard; }
+  var ax = 0;
+  if (tn.y >= tn.x && tn.y >= tn.z) { ax = 1; } else if (tn.z >= tn.x) { ax = 2; }
+  let o = ro + rl * (t0 + 1e-4);
+  let st = sign(r);
+  var c = clamp(floor(o), vec3f(0.), POD_G - 1.);
+  var tm = (c + step(vec3f(0.), r) - o) / r;
+  let td = abs(1. / r);
+  var te = 0.; var f = vec4f(0.);
+  for (var k = 0; k < 64; k++) {
+    f = cell(c, id, i.b.x);
+    if (f.w > 0.) { break; }
+    if (tm.x < tm.y && tm.x < tm.z) { c.x += st.x; te = tm.x; tm.x += td.x; ax = 0; }
+    else if (tm.y < tm.z) { c.y += st.y; te = tm.y; tm.y += td.y; ax = 1; }
+    else { c.z += st.z; te = tm.z; tm.z += td.z; ax = 2; }
+    if (any(c < vec3f(0.)) || any(c >= POD_G)) { discard; }
+  }
+  if (f.w <= 0.) { discard; }
+  var nl = vec3f(0.); nl[ax] = -st[ax];
+  let n = roty(nl, y);
+  let wp = g.cam.xyz + rd * ((t0 + te) * s);
+  let z = zone(wp); let vv = vol(wp);
+  let E = sunE(wp.y, z);
+  // lit like the fish, plus their own glow (more for the eyes)
+  var cc = f.rgb * (E * (.3 + .7 * sat(dot(n, g.sun.xyz))) + amb(wp, n, vv.g, z) * 1.3) + f.rgb * select(.3, .7, f.w == 2.);
+  cc *= select(select(.8, .9, ax == 0), select(.7, 1., nl.y > 0.), ax == 1);
+  var fo: FO;
+  fo.c = vec4f(fin(fog(cc, wp, z)).rgb, -8.);
+  fo.d = g.fwd.w / max(dot(wp - g.cam.xyz, g.fwd.xyz), g.fwd.w);
+  return fo;
+}
+`;
+
+// ---------------------------------------------------------------- podGAN swarm: genome-grown voxel creatures
+// Same idea as W_POD, but every creature is grown from its seed (b.w) by the integer hash shared with swarm.js, and
+// it swims: a.xyz position, a.w cell size, b.xyz its up axis (the way its body leads), c.xyz the way its face looks,
+// c.w how far it has contracted for the next jet (0..1).
+const W_SWARM = S_B + /*wgsl*/`
+const SG = vec3f(32., 32., 8.);
+const SPV = vec3f(16., 12., 4.);
+struct VO { @builtin(position) cp: vec4f, @location(0) wp: vec3f, @location(1) @interpolate(flat) a: vec4f, @location(2) @interpolate(flat) b: vec4f, @location(3) @interpolate(flat) c: vec4f };
+fn pcg(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+fn ih(s: u32, k: u32) -> f32 { return f32(pcg(pcg(s) + k) >> 8u) / 16777216.; }
+fn hf(x: f32) -> f32 { return fract(sin(x * 91.17 + 3.1) * 43758.5453); }
+fn hsv(h: f32, s: f32, v: f32) -> vec3f { let p = abs(fract(h + vec3f(1., 2. / 3., 1. / 3.)) * 6. - 3.); let c = v * mix(vec3f(1.), clamp(p - 1., vec3f(0.), vec3f(1.)), s); return c * c; }
+// the genome
+struct Gn { s: u32, ty: i32, ad: i32, mode: i32, h0: f32, h1: f32, fh: f32, bw: f32, st: f32, es: f32, ne: f32, rmax: f32,
+  nl: f32, lb: f32, lv: f32, na: f32, la: f32, root: f32, per: f32, ph: f32, fl: f32, gr: f32, cs: f32, sat: f32, val: f32, probe: f32 };
+fn genome(s: u32) -> Gn {
+  var G: Gn; G.s = s;
+  G.ty = min(i32(ih(s, 0u) * 8.), 7); G.ad = min(i32(ih(s, 1u) * 9.), 8);
+  G.mode = min(i32(ih(s, 4u) * 3.), 2);                    // 0 one colour, 1 two colours, 2 rainbow
+  G.h0 = ih(s, 5u); G.h1 = G.h0 + .15 + ih(s, 6u) * .35;
+  // face frame: green, teal, blue or purple, whichever is not too close to the body
+  var fi = i32(ih(s, 7u) * 4.) % 4;
+  let FH = array<f32, 4>(.33, .47, .62, .76);
+  let dh = abs(fract(FH[fi] - G.h0 + .5) - .5); if (dh < .1 && G.mode == 0) { fi = (fi + 2) % 4; }
+  G.fh = FH[fi];
+  let BW = array<vec2f, 8>(vec2f(5., 6.5), vec2f(5., 7.), vec2f(6., 7.5), vec2f(3.5, 5.), vec2f(6.5, 8.5), vec2f(7., 9.5), vec2f(5.5, 7.), vec2f(4., 8.));
+  let bw = BW[G.ty]; G.bw = bw.x + ih(s, 8u) * (bw.y - bw.x);
+  G.st = 1. + ih(s, 9u) * 2.;
+  if (G.ad == 2) { G.st *= 1.6; } if (G.ad == 0 || G.ad == 6) { G.st *= .6; }
+  G.es = select(select(3., 4., ih(s, 10u) < .2), 4., G.ad == 7);
+  G.ne = select(1. + floor(pow(ih(s, 11u), .8) * 8.), 1. + floor(ih(s, 11u) * 2.), G.ad == 7);
+  G.rmax = select(select(2. + step(ih(s, 12u), .25), 1. + step(ih(s, 12u), .5), G.ty == 4), 3., G.ty == 3);
+  let NL = array<f32, 8>(6., 7., 8., 10., 8., 12., 14., 5.); let LB = array<f32, 8>(5., 5., 5., 7., 3., 8., 4., 5.); let LV = array<f32, 8>(3., 3., 4., 4., 2., 4., 2., 5.);
+  G.nl = NL[G.ty] + select(0., floor(ih(s, 19u) * 5.), G.ty == 7);
+  G.lb = LB[G.ty] + select(0., 3., G.ad == 8); G.lv = LV[G.ty];
+  G.probe = floor(ih(s, 20u) * G.nl);
+  G.na = select(1. + floor(ih(s, 13u) * 3.), 4., G.ty == 4); G.la = 2. + floor(ih(s, 14u) * 2.);
+  G.root = step(ih(s, 15u), .55);
+  G.per = 4. + ih(s, 16u) * 3.; G.ph = ih(s, 17u) * 10.;
+  G.fl = select(select(.1, .25, G.ty == 7), .3, G.ad == 5);
+  G.gr = select(select(.05, .1, G.ad == 5), .12, G.ad == 1);
+  G.cs = select(select(.08, .2, G.mode == 2), .6, G.ad == 4);
+  G.sat = select(.85, .55, G.ad == 6); G.val = select(.85, .55, G.ad == 6);
+  return G;
+}
+fn bodyCol(G: Gn, tone: f32, tq: f32) -> vec3f {
+  let sh = tq * G.cs; let ti = floor(tone * 3.);
+  if (G.mode == 0) { return hsv(G.h0 + (ti - 1.) * .03 + sh * .2, G.sat, G.val * (.75 + ti * .1)); }
+  if (G.mode == 1) { return hsv(select(G.h0, G.h1, ti == 1.) + sh * .2, G.sat, G.val * (.85 + ti * .05)); }
+  return hsv(G.h0 + floor(tone * 6.) / 6. * .6 + sh, G.sat, G.val);
+}
+fn accCol(G: Gn, k: f32, tq: f32) -> vec3f {
+  let sh = tq * G.cs;
+  if (G.mode == 0) { return select(hsv(G.h0 + .02 + sh * .2, G.sat * .8, min(G.val * 1.15, 1.)), hsv(G.fh, .85, .55), k > .5); }
+  if (G.mode == 1) { return hsv(select(G.h1, G.h0, k > .5) + sh * .2, G.sat, G.val); }
+  return hsv(G.h0 + k * .7 + sh, G.sat, G.val);
+}
+fn faceCol(G: Gn) -> vec3f { return hsv(G.fh, .85, select(.5, .35, G.ad == 6)); }
+fn basis(b: vec4f, c: vec4f) -> mat3x3f { let u = normalize(b.xyz); let f = normalize(c.xyz - u * dot(c.xyz, u)); return mat3x3f(cross(u, f), u, f); }
+const CUBE = array<u32, 36>(0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5);
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f) -> VO {
+  let k = CUBE[vi];
+  let l = vec3f(f32(k & 1u), f32((k >> 1u) & 1u), f32(k >> 2u)) * SG;
+  var o: VO;
+  o.wp = a.xyz + basis(b, c) * ((l - SPV) * a.w);
+  o.cp = g.vp * vec4f(o.wp, 1.);
+  o.a = a; o.b = b; o.c = c;
+  return o;
+}
+// what fills cell c: rgb, and w = 0 empty, 1 body, 2 eye white, 3 pupil. lc: the camera in cell coordinates
+fn cell(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> vec4f {
+  let fr = floor((g.cam.w + G.ph) * 10.); let tq = fr * .1; // 10 frames a second, like the GIFs
+  let fs = f32(G.s % 9973u);
+  let m = sin(tq * TAU / G.per + G.ph);
+  let hw = max(round(G.bw + m * G.st - cn * 1.5), 2.);   // half-width in cells
+  let split = G.ad == 3 && hw >= 6.;
+  let es = G.es; let ep = es + 1.;
+  let glitch = step(1. - G.gr, hf(floor(tq * 2.) + fs));
+  let cx = c.x - 15.5 + glitch * round((hf(c.y + fr + fs) - .5) * 4.);
+  let ax = abs(cx);
+  // a splitting one is two heads side by side
+  let fhw = select(hw, floor((hw - 1.) / 2.), split);
+  let fcx = select(cx, ax - fhw - 1., split);
+  let fax = abs(fcx);
+  let nm = max(1., floor((2. * fhw - 1.) / ep));
+  let R = min(G.rmax, ceil(G.ne / nm));
+  let yb = 12.;
+  let yt = min(yb + 6. + R * ep + round(-m * 1.5), 31.);
+  let top = yt - 3.;
+  let tone = fract(cx / (hw * 2.) + c.y * .035 + tq * .12 + G.h1);
+  // legs: where leg i hangs, pulled together while it contracts
+  // no wider than the body allows (a narrow one shows fewer of its legs)
+  let nle = min(G.nl, hw + 1.);
+  let sq = 1. - .3 * cn; let hn = (nle - 1.) * .5;
+  let li = round((cx / sq) * .5 + hn);
+  let onLeg = li >= 0. && li < nle && cx == floor((li - hn) * 2. * sq) + .5;
+  if (c.y >= yb && c.y < yt) {
+    let dt = yt - 1. - c.y;
+    var ins = select(select(select(0., 1., dt == 1.), 2., dt == 0.), select(select(select(0., 1., dt == 2.), 2., dt == 1.), 3., dt == 0.), G.ty == 6);
+    ins += select(0., 1., c.y == yb) + step(1. - G.fl, hf(c.y * 7.1 + fr + fs + sign(cx)));
+    let edge = fax > fhw - ins - 1.;
+    if (fax < fhw - ins && c.z >= 1. && c.z <= 6. && !(edge && (c.z == 1. || c.z == 6.))) {
+      if (c.z == 6.) {
+        // the face: a frame around the grid of eyes
+        if (c.y <= top + 1. && c.y >= top - R * ep + 1. && fax <= min(nm, G.ne) * ep * .5 + .5) {
+          let ry = floor((top - c.y) / ep);
+          let n = clamp(G.ne - ry * nm, 0., nm);
+          let ex = floor(fcx + n * ep * .5);
+          let col = floor(ex / ep); let lx = ex - col * ep; let ly = (top - c.y) - ry * ep;
+          if (ry >= 0. && col >= 0. && col < n && lx < es && ly < es) { return vec4f(1.); }
+          return vec4f(faceCol(G), 1.);
+        }
+        // the dark sockets where the legs join
+        if (G.root > 0. && (c.y == yb + 1. || c.y == yb + 2.) && onLeg) { return vec4f(faceCol(G), 1.); }
+      }
+      return vec4f(select(bodyCol(G, tone, tq), accCol(G, 0., tq), dt <= 1. && G.mode != 2), 1.);
+    }
+    // eyes, one cell proud of the face
+    if (c.z == 7. && c.y <= top && c.y >= top - R * ep + 1. && fax < fhw - ins) {
+      let ry = floor((top - c.y) / ep);
+      let n = clamp(G.ne - ry * nm, 0., nm);
+      let ex = floor(fcx + n * ep * .5);
+      let col = floor(ex / ep); let lx = ex - col * ep; let ly = (top - c.y) - ry * ep;
+      if (col >= 0. && col < n && lx < es && ly < es) {
+        let e = col + ry * 7. + fs * .37;
+        // pupils: on the camera when it is close and in front, otherwise looking around (shifty ones dart)
+        let rel = lc - vec3f(15.5, top, 7.);
+        var pp: vec2f;
+        let shifty = G.ad == 1 && hf(e + floor(tq * 1.3)) > .5;
+        if (rel.z > 6. && dot(rel, rel) < 90000. && !shifty) {
+          pp = vec2f(1. + clamp(round(rel.x / rel.z * 4.), -1., 1.), 1. - clamp(round(rel.y / rel.z * 4.), -1., 1.));
+        } else {
+          let lk = floor(tq / select(1.6, .4, G.ad == 1) + hf(e) * 3.);
+          pp = vec2f(floor(hf(e + lk) * 2.99), floor(hf(e + lk + .5) * 2.99));
+        }
+        let ps = es - 2.; // a 3-cell eye has a 1-cell pupil, a 4-cell eye 2 cells
+        let blink = step(.97, hf(e + floor(tq * 4.))) > 0. && ly == floor(es * .5);
+        if ((lx >= pp.x && lx < pp.x + ps && ly >= pp.y && ly < pp.y + ps) || blink) { return vec4f(vec3f(.01), 3.); }
+        return vec4f(vec3f(.9), 2.);
+      }
+    }
+  }
+  if (c.z >= 3. && c.z <= 4.) {
+    // arms: stubs out of the sides
+    let ay = c.y - yb - 3.;
+    if (ay >= 0. && ay <= (G.na - 1.) * 2. && ay % 2. == 0. && ax >= hw - 1. && ax < hw + G.la - 1. + floor(hf(ay + sign(cx) + fr * .3 + fs) * 2.)) {
+      return vec4f(accCol(G, .3, tq), 1.);
+    }
+    // legs, wriggling, longer while it glides with them trailing
+    if (c.y < yb && onLeg) {
+      let L = G.lb + floor(ih(G.s, 21u + u32(li)) * G.lv) + floor(hf(li + fr * .5 + fs) * 2.) + round((1. - cn) * 1.5) + select(0., 5., li == G.probe && G.ad == 8);
+      if (c.y >= yb - L) {
+        let root = G.root > 0. && c.y >= yb - 2.;
+        let k = select(fract(li * .37 + tq * .3), .7, root);
+        return vec4f(select(select(bodyCol(G, fract(li / nle + tq * .1), tq), accCol(G, k, tq), G.mode == 2 || fract(li * .5) > .25), faceCol(G), root), 1.);
+      }
+    }
+  }
+  return vec4f(0.);
+}
+struct FO { @location(0) c: vec4f, @builtin(frag_depth) d: f32 };
+@fragment fn fs(i: VO) -> FO {
+  let B = basis(i.b, i.c); let s = i.a.w;
+  let G = genome(u32(i.b.w + .5));
+  let rd = normalize(i.wp - g.cam.xyz);
+  let dc = g.cam.xyz - i.a.xyz;
+  let ro = vec3f(dot(dc, B[0]), dot(dc, B[1]), dot(dc, B[2])) / s + SPV;
+  let rl = vec3f(dot(rd, B[0]), dot(rd, B[1]), dot(rd, B[2]));
+  let r = select(rl, vec3f(1e-6), abs(rl) < vec3f(1e-6));
+  let t1 = -ro / r; let t2 = (SG - ro) / r;
+  let tn = min(t1, t2); let tf = max(t1, t2);
+  let t0 = max(max(max(tn.x, tn.y), tn.z), 0.); let tx = min(min(tf.x, tf.y), tf.z);
+  if (t0 >= tx) { discard; }
+  var ax = 0;
+  if (tn.y >= tn.x && tn.y >= tn.z) { ax = 1; } else if (tn.z >= tn.x) { ax = 2; }
+  let o = ro + rl * (t0 + 1e-4);
+  let st = sign(r);
+  var c = clamp(floor(o), vec3f(0.), SG - 1.);
+  var tm = (c + step(vec3f(0.), r) - o) / r;
+  let td = abs(1. / r);
+  var te = 0.; var f = vec4f(0.);
+  for (var k = 0; k < 76; k++) {
+    f = cell(c, G, ro, i.c.w);
+    if (f.w > 0.) { break; }
+    if (tm.x < tm.y && tm.x < tm.z) { c.x += st.x; te = tm.x; tm.x += td.x; ax = 0; }
+    else if (tm.y < tm.z) { c.y += st.y; te = tm.y; tm.y += td.y; ax = 1; }
+    else { c.z += st.z; te = tm.z; tm.z += td.z; ax = 2; }
+    if (any(c < vec3f(0.)) || any(c >= SG)) { discard; }
+  }
+  if (f.w <= 0.) { discard; }
+  var nl = vec3f(0.); nl[ax] = -st[ax];
+  let n = B * nl;
+  let wp = g.cam.xyz + rd * ((t0 + te) * s);
+  let z = zone(wp); let vv = vol(wp);
+  let E = sunE(wp.y, z);
+  var cc = f.rgb * (E * (.3 + .7 * sat(dot(n, g.sun.xyz))) + amb(wp, n, vv.g, z) * 1.3) + f.rgb * select(.3, .7, f.w == 2.);
+  cc *= select(select(.8, .9, ax == 0), select(.7, 1., nl.y > 0.), ax == 1);
+  var fo: FO;
+  fo.c = vec4f(fin(fog(cc, wp, z)).rgb, -8.);
+  fo.d = g.fwd.w / max(dot(wp - g.cam.xyz, g.fwd.xyz), g.fwd.w);
+  return fo;
+}
+`;
+
+// ---------------------------------------------------------------- voxels: rebuilds the finished image out of cubes
+// Screen-space voxelisation. Each pixel walks a grid of g.mis.w-metre cells (0 turns it off) along its view ray,
+// starting just in front of the nearest surface around it. A cell is solid when the depth buffer puts a surface
+// near its centre, and takes the colour seen at its centre, so each cube is one flat colour with shaded faces.
+const W_VOX = S_G + W_FS + /*wgsl*/`
+@group(0) @binding(0) var<uniform> g: G;
+@group(0) @binding(1) var tS: texture_2d<f32>;
+@group(0) @binding(2) var tDp: texture_depth${AA > 1 ? '_multisampled' : ''}_2d;
+// ink clouds: K[0].x how many, then per cloud (centre, half-size) and (thickness 0..1, seed)
+@group(0) @binding(3) var<uniform> K: array<vec4f, 33>;
+fn ih3(p: vec3f) -> f32 { var q = fract(p * vec3f(.1031, .1030, .0973)); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
+// darkens what is seen through ink: blobby clouds of 0.4 m voxels, thick enough that 5 m of ink hides everything
+fn ink(c: vec3f, px: vec2i, fc: vec2f) -> vec3f {
+  let n = i32(K[0].x);
+  if (n == 0) { return c; }
+  let ndc = vec2f(fc.x * g.res.z * 2. - 1., 1. - fc.y * g.res.w * 2.);
+  let rd = normalize(g.fwd.xyz + g.right.xyz * (ndc.x * g.right.w) + g.up.xyz * (ndc.y * g.up.w));
+  let ts = min(zAt(px), 1e5) / dot(rd, g.fwd.xyz);
+  let ro = g.cam.xyz; let r = select(rd, vec3f(1e-6), abs(rd) < vec3f(1e-6));
+  var T = 1.;
+  for (var i = 0; i < n; i++) {
+    let a = K[1 + i * 2]; let b = K[2 + i * 2];
+    let t1 = (a.xyz - a.w - ro) / r; let t2 = (a.xyz + a.w - ro) / r;
+    let t0 = max(max(max(min(t1.x, t2.x), min(t1.y, t2.y)), min(t1.z, t2.z)), 0.);
+    let te = min(min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z)), ts);
+    if (te <= t0) { continue; }
+    let dt = (te - t0) / 12.;
+    for (var k = 0; k < 12; k++) {
+      let q = floor((ro + rd * (t0 + (f32(k) + .5) * dt)) / .4);
+      let l = length((q * .4 + .2 - a.xyz) / a.w);
+      if (1.15 - l + (ih3(q + b.y) - .5) * .6 > 0.) { T *= exp(-4. * b.x * dt); }
+    }
+  }
+  return mix(vec3f(.012, .01, .03), c, T);
+}
+@fragment fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
+  let c = vox(fc);
+  return vec4f(ink(c.rgb, vec2i(fc.xy), fc.xy), 1.);
+}
+// view depth (metres along the view direction) at a pixel; the backdrop counts as infinitely far
+fn zAt(p: vec2i) -> f32 {
+  let d = textureLoad(tDp, clamp(p, vec2i(0), vec2i(g.res.xy) - 1), 0);
+  return select(1e9, g.fwd.w / d, d > 1e-5);
+}
+// world point -> pixel (x, y) and view depth z
+fn proj(p: vec3f) -> vec3f {
+  let v = p - g.cam.xyz; let z = dot(v, g.fwd.xyz);
+  let s = vec2f(dot(v, g.right.xyz) / g.right.w, dot(v, g.up.xyz) / g.up.w) / max(z, 1e-4);
+  return vec3f((s.x * .5 + .5) * g.res.x, (.5 - s.y * .5) * g.res.y, z);
+}
+fn vox(fc: vec4f) -> vec4f {
+  let px = vec2i(fc.xy);
+  let src = textureLoad(tS, px, 0);
+  let V = g.mis.w;
+  if (V <= 0. || src.a < 0.) { return vec4f(src.rgb, 1.); } // off, or a podGAN (already voxels)
+  let ndc = vec2f(fc.x * g.res.z * 2. - 1., 1. - fc.y * g.res.w * 2.);
+  let rd = normalize(g.fwd.xyz + g.right.xyz * (ndc.x * g.right.w) + g.up.xyz * (ndc.y * g.up.w));
+  let rz = dot(rd, g.fwd.xyz);
+  let fp = g.res.y / (2. * g.up.w); // pixels per metre at 1 m
+  // nearest surface around the pixel, out to a cube's width on screen: a cube can stick out that far past a
+  // smooth silhouette
+  let pz = zAt(px);
+  var zn = pz;
+  for (var k = 0; k < 2; k++) {
+    let r = min(V * fp / zn, 128.);
+    for (var i = 0; i < 8; i++) {
+      let a = f32(i) * .7853982 + f32(k) * .3926991;
+      zn = min(zn, zAt(px + vec2i(vec2f(cos(a), sin(a)) * r)));
+    }
+  }
+  if (zn > 1e8) { return vec4f(src.rgb, 1.); }
+  let t0 = max((zn - 1.5 * V) / rz, g.fwd.w);
+  let tEnd = min(pz, 1e5) / rz + 2. * V;
+  // walk the grid (Amanatides & Woo)
+  let o = g.cam.xyz + rd * t0;
+  let r = select(rd, vec3f(1e-6), abs(rd) < vec3f(1e-6));
+  let st = sign(r);
+  var c = floor(o / V);
+  var tm = ((c + step(vec3f(0.), r)) * V - o) / r;
+  let td = abs(V / r);
+  var te = 0.;
+  var ax = 1;
+  if (abs(rd.x) > abs(rd.y) && abs(rd.x) > abs(rd.z)) { ax = 0; } else if (abs(rd.z) > abs(rd.y)) { ax = 2; }
+  var hit = false; var q = vec3f(0.);
+  for (var i = 0; i < 48; i++) {
+    q = proj((c + .5) * V);
+    if (q.z > g.fwd.w && all(q.xy >= vec2f(0.)) && all(q.xy < g.res.xy)) {
+      let dd = q.z - zAt(vec2i(q.xy));
+      if (dd > -.5 * V && dd < 2. * V && textureLoad(tS, vec2i(q.xy), 0).a >= 0.) { hit = true; break; }
+    }
+    if (tm.x < tm.y && tm.x < tm.z) { c.x += st.x; te = tm.x; tm.x += td.x; ax = 0; }
+    else if (tm.y < tm.z) { c.y += st.y; te = tm.y; tm.y += td.y; ax = 1; }
+    else { c.z += st.z; te = tm.z; tm.z += td.z; ax = 2; }
+    if (t0 + te > tEnd) { break; }
+  }
+  if (!hit) { return vec4f(src.rgb, 1.); }
+  // the cube's colour: a small average around where its centre lands, so it doesn't flicker
+  let cs = max(V * fp / q.z * .2, 1.);
+  var col = vec3f(0.);
+  for (var i = 0; i < 4; i++) {
+    let o2 = vec2f(f32(i & 1) - .5, f32(i >> 1) - .5) * cs;
+    col += textureLoad(tS, clamp(vec2i(q.xy + o2), vec2i(0), vec2i(g.res.xy) - 1), 0).rgb;
+  }
+  col *= .25;
+  // face shading and a soft dark seam along the cube's edges, both fading out where cubes get small or fogged
+  let t = t0 + te;
+  let fogK = exp(-t / 45.);
+  var sh = select(select(.7, .84, ax == 0), select(.55, 1., rd.y < 0.), ax == 1);
+  let hp = (g.cam.xyz + rd * t) / V - c;
+  let uv = select(select(hp.xy, hp.yz, ax == 0), hp.xz, ax == 1);
+  let e = min(min(uv.x, 1. - uv.x), min(uv.y, 1. - uv.y));
+  let seam = mix(1., ss(0., .08, e) * .3 + .7, sat(V * fp / t / 6. - .5));
+  sh = mix(1., sh * seam, fogK);
+  return vec4f(col * sh, 1.);
+}
+`;
+
 const W_POST = S_G + W_FS + /*wgsl*/`
 @group(0) @binding(0) var<uniform> g: G;
 @group(0) @binding(1) var sC: sampler;
