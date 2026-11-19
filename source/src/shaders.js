@@ -948,7 +948,8 @@ fn basis(b: vec4f, c: vec4f) -> mat3x3f { let u = normalize(b.xyz); let f = norm
 const CUBE = array<u32, 36>(0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5);
 @vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f) -> VO {
   let k = CUBE[vi];
-  let l = vec3f(f32(k & 1u), f32((k >> 1u) & 1u), f32(k >> 2u)) * SG;
+  let pad = select(0., 1., u32(b.w + .5) >= 4096u); // outlined podGANs get a box one cell bigger all round
+  let l = vec3f(f32(k & 1u), f32((k >> 1u) & 1u), f32(k >> 2u)) * (SG + 2. * pad) - pad;
   var o: VO;
   o.wp = a.xyz + basis(b, c) * ((l - SPV) * a.w);
   o.cp = g.vp * vec4f(o.wp, 1.);
@@ -1046,16 +1047,45 @@ fn cell(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> vec4f {
   }
   return vec4f(0.);
 }
+fn solidAt(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
+  if (any(c < vec3f(0.)) || any(c >= SG)) { return false; }
+  return cell(c, G, lc, cn).w > 0.;
+}
+// the wireframe drawing of the podGAN you are in: is point p (cell coordinates) on the face between solid cell a
+// and empty cell b (across axis ax) within w of one of the face's edges where the surface folds (the cell beside
+// a is empty, or the one beside b is solid)? Flat stretches of surface get no lines, so it reads as an outline
+fn crease(a: vec3f, b: vec3f, ax: i32, p: vec3f, G: Gn, lc: vec3f, cn: f32, w: f32) -> bool {
+  for (var k = 0; k < 3; k++) {
+    if (k == ax) { continue; }
+    let u = p[k] - a[k];
+    for (var e = 0; e < 2; e++) {
+      if (select(u, 1. - u, e == 1) < w) {
+        var d = vec3f(0.); d[k] = select(-1., 1., e == 1);
+        if (!solidAt(a + d, G, lc, cn) || solidAt(b + d, G, lc, cn)) { return true; }
+      }
+    }
+  }
+  return false;
+}
 struct FO { @location(0) c: vec4f, @builtin(frag_depth) d: f32 };
+// b.w is the podGAN's number plus 2048 x how to draw it: 0 normally, 1 as a wireframe (the one you are in),
+// 2 with a glowing red outline (another player who is IT), 3 with a gold outline (another player still free)
+fn near(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
+  return solidAt(c + vec3f(1., 0., 0.), G, lc, cn) || solidAt(c - vec3f(1., 0., 0.), G, lc, cn)
+      || solidAt(c + vec3f(0., 1., 0.), G, lc, cn) || solidAt(c - vec3f(0., 1., 0.), G, lc, cn)
+      || solidAt(c + vec3f(0., 0., 1.), G, lc, cn) || solidAt(c - vec3f(0., 0., 1.), G, lc, cn);
+}
 @fragment fn fs(i: VO) -> FO {
   let B = basis(i.b, i.c); let s = i.a.w;
-  let G = genome(u32(i.b.w + .5));
+  let id = u32(i.b.w + .5); let mode = id / 2048u; let wire = mode == 1u; let outl = mode >= 2u;
+  let lo = select(vec3f(0.), vec3f(-1.), outl); let hi = SG - lo;
+  let G = genome(id % 2048u);
   let rd = normalize(i.wp - g.cam.xyz);
   let dc = g.cam.xyz - i.a.xyz;
   let ro = vec3f(dot(dc, B[0]), dot(dc, B[1]), dot(dc, B[2])) / s + SPV;
   let rl = vec3f(dot(rd, B[0]), dot(rd, B[1]), dot(rd, B[2]));
   let r = select(rl, vec3f(1e-6), abs(rl) < vec3f(1e-6));
-  let t1 = -ro / r; let t2 = (SG - ro) / r;
+  let t1 = (lo - ro) / r; let t2 = (hi - ro) / r;
   let tn = min(t1, t2); let tf = max(t1, t2);
   let t0 = max(max(max(tn.x, tn.y), tn.z), 0.); let tx = min(min(tf.x, tf.y), tf.z);
   if (t0 >= tx) { discard; }
@@ -1063,19 +1093,63 @@ struct FO { @location(0) c: vec4f, @builtin(frag_depth) d: f32 };
   if (tn.y >= tn.x && tn.y >= tn.z) { ax = 1; } else if (tn.z >= tn.x) { ax = 2; }
   let o = ro + rl * (t0 + 1e-4);
   let st = sign(r);
-  var c = clamp(floor(o), vec3f(0.), SG - 1.);
+  var c = clamp(floor(o), lo, hi - 1.);
   var tm = (c + step(vec3f(0.), r) - o) / r;
   let td = abs(1. / r);
   var te = 0.; var f = vec4f(0.);
-  for (var k = 0; k < 76; k++) {
-    f = cell(c, G, ro, i.c.w);
-    if (f.w > 0.) { break; }
+  if (wire) {
+    // walk every cell along the ray (the creature is see-through) and draw the folds of the surface where the ray
+    // goes in (bright) or comes out the back (dim)
+    var prev = false; var hit = false; var front = true; var hitT = 0.;
+    for (var k = 0; k < 96; k++) {
+      let sol = cell(c, G, ro, i.c.w).w > 0.;
+      if (sol != prev) {
+        var e3 = vec3f(0.); e3[ax] = st[ax];
+        if (crease(select(c - e3, c, sol), select(c, c - e3, sol), ax, o + rl * te, G, ro, i.c.w, .11)) { hit = true; front = sol; hitT = te; break; }
+      }
+      prev = sol;
+      if (tm.x < tm.y && tm.x < tm.z) { c.x += st.x; te = tm.x; tm.x += td.x; ax = 0; }
+      else if (tm.y < tm.z) { c.y += st.y; te = tm.y; tm.y += td.y; ax = 1; }
+      else { c.z += st.z; te = tm.z; tm.z += td.z; ax = 2; }
+      if (any(c < vec3f(0.)) || any(c >= SG)) {
+        if (prev) { // leaving the box straight out of a solid cell
+          var e3 = vec3f(0.); e3[ax] = st[ax];
+          if (crease(c - e3, c, ax, o + rl * te, G, ro, i.c.w, .11)) { hit = true; front = false; hitT = te; }
+        }
+        break;
+      }
+    }
+    if (!hit) { discard; }
+    let wpw = g.cam.xyz + rd * ((t0 + hitT) * s);
+    let pulse = .85 + .15 * sin(g.cam.w * 3.);
+    var fw: FO;
+    fw.c = vec4f(select(vec3f(.25, .5, .65), vec3f(1.2, 2.1, 2.4), front) * pulse, -8.);
+    fw.d = g.fwd.w / max(dot(wpw - g.cam.xyz, g.fwd.xyz), g.fwd.w);
+    return fw;
+  }
+  // outlined: the ray that misses the body but passes through a cell touching it draws the outline there, so
+  // only the outside edge of the silhouette lights up, like cel shading
+  var oT = -1.;
+  for (var k = 0; k < 84; k++) {
+    if (all(c >= vec3f(0.)) && all(c < SG)) {
+      f = cell(c, G, ro, i.c.w);
+      if (f.w > 0.) { break; }
+    }
+    if (outl && oT < 0. && near(c, G, ro, i.c.w)) { oT = te; }
     if (tm.x < tm.y && tm.x < tm.z) { c.x += st.x; te = tm.x; tm.x += td.x; ax = 0; }
     else if (tm.y < tm.z) { c.y += st.y; te = tm.y; tm.y += td.y; ax = 1; }
     else { c.z += st.z; te = tm.z; tm.z += td.z; ax = 2; }
-    if (any(c < vec3f(0.)) || any(c >= SG)) { discard; }
+    if (any(c < lo) || any(c >= hi)) { break; }
   }
-  if (f.w <= 0.) { discard; }
+  if (f.w <= 0.) {
+    if (oT < 0.) { discard; }
+    let wpo = g.cam.xyz + rd * ((t0 + oT) * s);
+    let pulse = 1.5 + 1.1 * sin(g.cam.w * 4. + f32(id % 2048u) * 1.9);
+    var fl: FO;
+    fl.c = vec4f(select(vec3f(1., .78, .2), vec3f(1., .12, .16), mode == 2u) * pulse, -8.);
+    fl.d = g.fwd.w / max(dot(wpo - g.cam.xyz, g.fwd.xyz), g.fwd.w);
+    return fl;
+  }
   var nl = vec3f(0.); nl[ax] = -st[ax];
   let n = B * nl;
   let wp = g.cam.xyz + rd * ((t0 + te) * s);
@@ -1101,7 +1175,8 @@ const W_VOX = S_G + W_FS + /*wgsl*/`
 // ink clouds: K[0].x how many, then per cloud (centre, half-size) and (thickness 0..1, seed)
 @group(0) @binding(3) var<uniform> K: array<vec4f, 33>;
 fn ih3(p: vec3f) -> f32 { var q = fract(p * vec3f(.1031, .1030, .0973)); q += dot(q, q.yzx + 33.33); return fract((q.x + q.y) * q.z); }
-// darkens what is seen through ink: blobby clouds of 0.4 m voxels, thick enough that 5 m of ink hides everything
+// darkens what is seen through ink: blobby clouds of 0.9 m voxels, nearly black, thick enough that a couple of
+// metres of ink hides everything
 fn ink(c: vec3f, px: vec2i, fc: vec2f) -> vec3f {
   let n = i32(K[0].x);
   if (n == 0) { return c; }
@@ -1116,14 +1191,14 @@ fn ink(c: vec3f, px: vec2i, fc: vec2f) -> vec3f {
     let t0 = max(max(max(min(t1.x, t2.x), min(t1.y, t2.y)), min(t1.z, t2.z)), 0.);
     let te = min(min(min(max(t1.x, t2.x), max(t1.y, t2.y)), max(t1.z, t2.z)), ts);
     if (te <= t0) { continue; }
-    let dt = (te - t0) / 12.;
-    for (var k = 0; k < 12; k++) {
-      let q = floor((ro + rd * (t0 + (f32(k) + .5) * dt)) / .4);
-      let l = length((q * .4 + .2 - a.xyz) / a.w);
-      if (1.15 - l + (ih3(q + b.y) - .5) * .6 > 0.) { T *= exp(-4. * b.x * dt); }
+    let dt = (te - t0) / 20.;
+    for (var k = 0; k < 20; k++) {
+      let q = floor((ro + rd * (t0 + (f32(k) + .5) * dt)) / .9);
+      let l = length((q * .9 + .45 - a.xyz) / a.w);
+      if (1.15 - l + (ih3(q + b.y) - .5) * .5 > 0.) { T *= exp(-9. * b.x * dt); }
     }
   }
-  return mix(vec3f(.012, .01, .03), c, T);
+  return mix(vec3f(.0012, .001, .003), c, T);
 }
 @fragment fn fs(@builtin(position) fc: vec4f) -> @location(0) vec4f {
   let c = vox(fc);

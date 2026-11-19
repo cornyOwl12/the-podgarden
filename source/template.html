@@ -133,6 +133,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 #feed { position: absolute; right: 1.2em; top: 3.6em; text-align: right; font: .9em/1.7 ui-monospace, Consolas, monospace; color: #e8fbff; text-shadow: 0 1px 4px #000; }
 #lbl p { position: absolute; transform: translate(-50%, -100%); font: 700 .85em ui-monospace, Consolas, monospace; color: #e8fbff; text-shadow: 0 1px 4px #000; white-space: nowrap; }
 #lbl p.it { color: #ff6b6b; }
+#lbl p.free { color: #ffd75e; }
 #n.pl { color: #ffe066; }
 .hurt #hud { animation: hurt .6s; }
 @keyframes hurt { from { box-shadow: inset 0 0 12em #ff1e1ecc; } to { box-shadow: inset 0 0 12em #ff1e1e00; } }
@@ -142,6 +143,17 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 #sb p { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 1em; }
 #sb p.it { color: #ff6b6b; }
 #sb b { color: #7ff3ff; font-weight: 400; }
+#ink { position: absolute; left: 1.2em; bottom: 1.2em; font: .9em ui-monospace, Consolas, monospace; color: #e8fbff99; text-shadow: 0 1px 4px #000; }
+#ink.ok { color: #9ff6ff; }
+/* end of a round: last one caught first, the winner in gold */
+#res { position: absolute; left: 50%; top: 14%; transform: translateX(-50%); min-width: 30em; padding: 1.2em 1.6em; border-radius: .8em; background: #03131cee;
+  box-shadow: 0 0 0 2px #ffd75e80, 0 0 3em #000c; font: .95em/2 ui-monospace, Consolas, monospace; color: #e8fbff; display: none; pointer-events: none; text-align: left; }
+#res.v { display: block; }
+#res h2 { margin: 0 0 .4em; text-align: center; font: 900 1.6em system-ui, sans-serif; letter-spacing: .06em; color: #ffd75e; text-transform: uppercase; }
+#res p { display: grid; grid-template-columns: 2em 2fr 1.4fr 1fr; gap: .8em; }
+#res p.win { color: #ffd75e; font-size: 1.15em; }
+#res p.me span:nth-child(2) { text-decoration: underline; text-underline-offset: .25em; }
+#res p.nx { display: block; margin-top: .6em; text-align: center; color: #7ff3ff; font-size: .9em; }
 #nm { padding: .8em 1em; border: 0; border-radius: .5em; background: #03131cd9; box-shadow: inset 0 0 0 2px #7ff3ff80; color: #e8fbff;
   font: 700 1em system-ui, sans-serif; letter-spacing: .06em; text-align: center; outline: none; }
 #nm:focus { box-shadow: inset 0 0 0 2px #7ff3ff; }
@@ -163,11 +175,11 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
         <p>
           <i><b>Mouse</b></i>Aim
           <i><b>Space</b></i>Jet · hold for full jets
-          <i><b>Left click</b></i>Jump into a podGAN
-          <i><b>Right click</b></i>Squirt ink
+          <i><b>Left click</b></i>Jump into a podGAN · catch a player
+          <i><b>Right click</b></i>Squirt ink (once a minute)
         </p>
         <p>
-          <i><b>Tab</b></i>Scores
+          <i><b>Tab</b></i>Players
           <i><b>Esc</b></i>Menu
           <i><b>M</b></i>Mute
           <i><b>H</b></i>Stats
@@ -181,8 +193,9 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 <button id=o aria-label=Menu>≡</button>
 <pre id=i></pre>
 <div id=n></div>
-<div id=hud><div id=lbl></div><i id=x></i><p id=itb></p><div id=feed></div></div>
+<div id=hud><div id=lbl></div><i id=x></i><p id=itb></p><div id=feed></div><p id=ink></p></div>
 <div id=sb></div>
+<div id=res></div>
 <script>
 /*SCRIPT*/
 </script>
