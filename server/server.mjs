@@ -39,10 +39,11 @@ let host = -1;
 
 const send = (ws, m) => { if (ws.readyState === 1) ws.send(typeof m === 'string' || Buffer.isBuffer(m) ? m : JSON.stringify(m)); };
 const all = (m, except) => { const s = JSON.stringify(m); for (const [id, ws] of socks) if (id !== except) send(ws, s); };
-const game = TagGame({ npod: NPOD, now: Date.now, emit: (m) => all(m) });
+// a catch takes 400 ms here: the victim's 0.2 s to ink away, plus time for the messages to get there and back
+const game = TagGame({ npod: NPOD, now: Date.now, emit: (m) => all(m), enter: 400 });
 const clean = (s) => String(s || '').replace(/[^\p{L}\p{N} _.-]/gu, '').trim().slice(0, 16);
 function pickHost() { const h = socks.size ? Math.min(...socks.keys()) : -1; if (h !== host) { host = h; all({ t: 'host', id: host }); } }
-setInterval(() => game.tick(), 250);
+setInterval(() => game.tick(), 25);
 
 wss.on('connection', (ws) => {
   let id = 0; while (socks.has(id)) id++;

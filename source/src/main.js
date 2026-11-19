@@ -594,7 +594,8 @@ function sdAt(x, y, z) {
 function swim(dt) {
   const { P, V, H, O, U, L, ph, cn, roam, g } = SW, cx = F[CX], cy = F[CY], cz = F[CZ];
   for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
-    if (SW.own[i] >= 0) continue; // a player is swimming this one
+    // other people's podGANs move by their own messages; yours and the bots' drift with the swarm
+    const ow = SW.own[i]; if (ow >= 0 && ow !== NET.id && !NET.players.get(ow)?.bot) continue;
     const G = g[i];
     let px = P[j], py = P[j + 1], pz = P[j + 2], vx = V[j], vy = V[j + 1], vz = V[j + 2], hx = H[j], hy = H[j + 1], hz = H[j + 2];
     let p = ph[i] + dt / G.per;
@@ -603,7 +604,7 @@ function swim(dt) {
       let ox = O[j] - px, oy = O[j + 1] - py, oz = O[j + 2] - pz; const od = hypot(ox, oy, oz) + 1e-6, pull = od > roam[i] ? 1.4 * od / roam[i] : 0.25;
       hx += rn(0) * 1.4 + ox / od * pull; hy += rn(1) * 0.7 + oy / od * pull + (py > -5 ? -0.8 : 0); hz += rn(2) * 1.4 + oz / od * pull;
       const tx = px - cx, ty = py - cy, tz = pz - cz, td = hypot(tx, ty, tz);
-      if (td < 4) { hx += tx / td; hy += ty / td; hz += tz / td; } // startled by the swimmer
+      if (td < 4 && i !== PL.pod) { hx += tx / td; hy += ty / td; hz += tz / td; } // startled by the swimmer
       hy *= 0.6; const l = hypot(hx, hy, hz) + 1e-6; hx /= l; hy /= l; hz /= l;
     }
     ph[i] = p;
@@ -678,10 +679,10 @@ function packSwarm() {
 // file, GitHub Pages, or alone on the server) you play against 7 bots, with the same rules running in the browser.
 const NET = { ws: null, id: 0, host: true, online: false, solo: null, players: new Map(), its: new Set(), at: new Map(), tags: new Map(),
   state: 'wait', n: 0, t0: 0, next: 0, res: null, sendT: 0, podT: 0 };
-const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9, boost: 0 };
+const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9, boost: 0, entering: false, enterAt: 0, beepT: 0 };
 const INK_GAP = 60, INK_LIFE = 14;
 // sonar: left-click open water to ping. Players within PING_R metres show through everything for SEEN seconds
-const PING_GAP = 5, PING_R = 70, SEEN = 3;
+const PING_GAP = 5, PING_R = 70, SEEN = 3, ESCAPE = 1.5;
 const seen = new Map(); // player id -> when your sonar found them close by
 const heard = new Map(); // player id -> when your sonar last heard them, near or far (for the arrows)
 const inks = []; // { x, y, z, t, seed }
@@ -785,7 +786,28 @@ function netMsg(m) {
       if (m.id === NET.id) { become(m.i, false); feed(`You are now a ${SW.g[m.i].name}`); }
       else { const p = P.get(m.id); if (p) { if (own[m.from] === m.id) own[m.from] = -1; p.pod = m.i; p.tp = null; own[m.i] = m.id; } }
       break;
+    case 'enter': { // m.by is getting into m.v's podGAN: m.v can ink away in time
+      if (m.v === NET.id) {
+        const inkOk = INK_GAP - (F[TIME] - PL.inkT) <= 0;
+        warnOn(inkOk ? `⚠️ ${esc(pname(m.by))} is getting in!<br><b>RIGHT-CLICK NOW!</b>` : `⚠️ ${esc(pname(m.by))} is getting in!<br><small>no ink left…</small>`);
+        sfx(1800, 600, 0.25, 0.35, 'sawtooth'); flash();
+      } else if (m.by === NET.id) feed(`Getting into ${pname(m.v)}…`);
+      const b = NET.solo?.bots.get(m.v);
+      if (m.local && b && b.ink <= 0 && Math.random() < 0.45) setTimeout(() => { // bots sometimes ink away in time
+        const pv = P.get(m.v), hp = m.by === NET.id ? PL.pod : P.get(m.by)?.pod ?? -1;
+        if (!pv || !NET.solo || hp < 0) return;
+        const j = pv.pod * 3, k = hp * 3;
+        botInk(m.v, b, pv.pod, SW.P[j] - SW.P[k] + Math.random() - 0.5, (SW.P[j + 1] - SW.P[k + 1]) * 0.3, SW.P[j + 2] - SW.P[k + 2] + Math.random() - 0.5);
+      }, 60 + Math.random() * 100);
+      break;
+    }
+    case 'dodge':
+      if (m.v === NET.id) { warnOff(); feed('💨 You inked away just in time!'); }
+      else if (m.by === NET.id) feed(`${pname(m.v)} got away!`);
+      else feed(`${pname(m.v)} escaped ${pname(m.by)}`);
+      break;
     case 'catch': { // m.by jumped into m.v's podGAN m.i; it split and m.v swims off in m.vi, IT now too
+      if (m.v === NET.id) warnOff();
       NET.its.add(m.v); NET.at.set(m.v, now); NET.tags.set(m.by, (NET.tags.get(m.by) || 0) + 1);
       const pb = P.get(m.by), pv = P.get(m.v);
       if (own[m.from] === m.by) own[m.from] = -1;
@@ -902,7 +924,6 @@ function jump() {
   else netSend({ t: 'jump', i });
 }
 // sonar ping: a ring sweeps out from the middle of the screen and finds every other player close by
-let pingAC = null;
 function ping() {
   if (PL.pod < 0) return;
   const wait = PING_GAP - (F[TIME] - PL.pingT);
@@ -917,13 +938,33 @@ function ping() {
   }
   feed(`📡 Sonar: ${n || 'nobody'} nearby${nf ? ` · ${nf} far away (follow the arrows)` : ''}`);
   const r = document.createElement('i'); r.className = 'ping'; document.body.append(r); setTimeout(() => r.remove(), 1300);
+  sfx(1500, 700, 1.2, .25);
+}
+// a short tone sliding from f0 to f1 Hz, through the game's sound (audio.js), quiet when muted
+function sfx(f0, f1, dur, vol, type = 'sine') {
   try {
-    pingAC ??= new AudioContext();
-    const t = pingAC.currentTime, o = pingAC.createOscillator(), gn = pingAC.createGain();
-    o.frequency.setValueAtTime(1500, t); o.frequency.exponentialRampToValueAtTime(700, t + .9);
-    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(.25, t + .02); gn.gain.exponentialRampToValueAtTime(.0001, t + 1.2);
-    o.connect(gn).connect(pingAC.destination); o.start(t); o.stop(t + 1.3);
+    if (muted) return; if (!AC) sound();
+    const t = AC.currentTime, o = AC.createOscillator(), gn = AC.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur * .75);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .015); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn).connect(OUT || AC.destination); o.start(t); o.stop(t + dur + .05);
   } catch {}
+}
+// warnings: a hunter closing in beeps faster and faster; one getting into your podGAN sets off the alarm, and you
+// have a split second to right-click and ink away
+const warnEl = $('warn'), hudEl = $('hud');
+function warnOn(html) { PL.entering = true; PL.enterAt = F[TIME]; warnEl.innerHTML = html; warnEl.className = 'on'; }
+function warnOff() { PL.entering = false; warnEl.className = ''; }
+function hunterBeep(dt) {
+  if (PL.entering && F[TIME] - PL.enterAt > 0.8) warnOff();
+  if (NET.state !== 'play' || PL.pod < 0 || isIt(NET.id)) return;
+  let d = 1e9;
+  for (const [id, p] of NET.players) if (id !== NET.id && isIt(id) && SW.own[p.pod] === id) d = min(d, dist(PL.pod, p.pod));
+  if (d > 40) { PL.beepT = 0; return; }
+  if ((PL.beepT -= dt) > 0) return;
+  PL.beepT = 0.12 + d / 40 * 1.1;
+  sfx(d < 15 ? 1320 : 990, d < 15 ? 1320 : 990, 0.09, 0.12 + (1 - d / 40) * 0.2, 'square');
+  hudEl.classList.remove('near'); void hudEl.offsetWidth; hudEl.classList.add('near');
 }
 function addInk(x, y, z) { inks.push({ x, y, z, t: 0, seed: Math.random() * 100 }); if (inks.length > NINK) inks.shift(); }
 // ink squirts out behind a podGAN (dx, dy, dz: the way it faces)
@@ -933,51 +974,37 @@ function inkAt(i, dx, dy, dz) {
 }
 function squirt() {
   if (PL.pod < 0) return;
+  const dodged = PL.entering;
   const wait = INK_GAP - (F[TIME] - PL.inkT);
   if (wait > 0) { feed(`Your ink refills in ${Math.ceil(wait)} s`); return; }
   if (NET.solo && !NET.solo.game.ink(NET.id)) return;
   PL.inkT = F[TIME];
   const [x, y, z] = inkAt(PL.pod, F[FX], F[FY], F[FZ]);
   addInk(x, y, z);
-  PL.boost = 2.6; feed('🦑 Ink! Jets on full: swim for it!');
+  PL.boost = ESCAPE; warnOff();
+  if (!dodged) feed('🦑 Ink! Jets on full: swim for it!');
   if (!NET.solo) netSend({ t: 'ink', p: [+x.toFixed(2), +y.toFixed(2), +z.toFixed(2)] });
 }
 // ink clouds for the voxel pass: centre + half-size (grows to 10 m in 2.5 s), then thickness (fades over the last 4 s)
 function inkData() {
   let n = 0;
   for (const c of inks) {
-    const h = 10 * min(c.t / 2.5, 1), th = min(1, (INK_LIFE - c.t) / 4);
+    const h = 20 * min(c.t / 2.5, 1), th = min(1, (INK_LIFE - c.t) / 4);
     if (th <= 0) continue;
     inkArr.set([c.x, c.y, c.z, max(h, 0.6), th, c.seed, 0, 0], 4 + n * 8); n++;
   }
   inkArr[0] = n;
   return inkArr;
 }
-// rock in the way: push off it and lose the speed going into it (shared by you and the bots)
-function bump(i, v, dt) {
-  const { P } = SW, j = i * 3, h = SW.g[i].size * 8, px = P[j], py = P[j + 1] + h, pz = P[j + 2];
-  const sd = sdAt(px, py, pz); if (sd <= -0.6) return;
-  let gx = sdAt(px + 0.4, py, pz) - sdAt(px - 0.4, py, pz), gy = sdAt(px, py + 0.4, pz) - sdAt(px, py - 0.4, pz), gz = sdAt(px, py, pz + 0.4) - sdAt(px, py, pz - 0.4);
-  const gl = hypot(gx, gy, gz); if (gl < 1e-4) return;
-  gx /= gl; gy /= gl; gz /= gl; const vn = v[0] * gx + v[1] * gy + v[2] * gz;
-  if (vn > 0) { v[0] -= gx * vn * 1.5; v[1] -= gy * vn * 1.5; v[2] -= gz * vn * 1.5; }
-  const k = (sd + 0.6) * min(1, dt * 10); P[j] -= gx * k; P[j + 1] -= gy * k; P[j + 2] -= gz * k;
+// ink escape: jets flat out along (dx, dy, dz), heading that way too so the swarm drift doesn't fight it
+function jetOut(i, dx, dy, dz, dt, left) {
+  const { V, H, cn } = SW, j = i * 3, l = hypot(dx, dy, dz) || 1, a = 48 * dt / l;
+  V[j] += dx * a; V[j + 1] += dy * a; V[j + 2] += dz * a;
+  H[j] = dx / l; H[j + 1] = dy / l * 0.6; H[j + 2] = dz / l;
+  cn[i] = 0.5 + 0.5 * sin(F[TIME] * 22 + i);
+  if (left <= 0) SW.ph[i] = 0.7; // and back to drifting, gliding out of the last jet
 }
-// moves podGAN i with velocity v, leaning its body into the motion with its face looking along (fx, fy, fz)
-function glide(i, v, fx, fy, fz, dt, ku) {
-  const { P, V, U, L } = SW, j = i * 3;
-  bump(i, v, dt);
-  let px = P[j] + v[0] * dt, py = P[j + 1] + v[1] * dt, pz = P[j + 2] + v[2] * dt;
-  if (py > -1.8) { py = -1.8; v[1] = min(v[1], 0); }
-  const rr = hypot(px, pz); if (rr > 150) { px *= 150 / rr; pz *= 150 / rr; }
-  P[j] = px; P[j + 1] = py; P[j + 2] = pz; V[j] = v[0]; V[j + 1] = v[1]; V[j + 2] = v[2];
-  const sp = hypot(v[0], v[1], v[2]) + 1e-6, t = min(sp / 1.5, 1) * 0.8;
-  let ux = v[0] / sp * t, uy = (1 - t) + v[1] / sp * t, uz = v[2] / sp * t; let l = hypot(ux, uy, uz) + 1e-6;
-  ux = U[j] + (ux / l - U[j]) * ku; uy = U[j + 1] + (uy / l - U[j + 1]) * ku; uz = U[j + 2] + (uz / l - U[j + 2]) * ku; l = hypot(ux, uy, uz) + 1e-6;
-  U[j] = ux / l; U[j + 1] = uy / l; U[j + 2] = uz / l;
-  L[j] = fx; L[j + 1] = fy; L[j + 2] = fz;
-}
-// swims your podGAN and places the camera behind and above it
+// places the camera behind and above your podGAN
 const vTmp = [0, 0, 0];
 function pilot(dt) {
   for (let k = inks.length - 1; k >= 0; k--) if ((inks[k].t += dt) > INK_LIFE) inks.splice(k, 1);
@@ -989,14 +1016,9 @@ function pilot(dt) {
   const { P, V, U, cn } = SW, j = i * 3, s = SW.g[i].size;
   const cp = cos(F[PIT]), fx = cp * sin(F[YAW]), fy = sin(F[PIT]), fz = -cp * cos(F[YAW]);
   let vx = V[j], vy = V[j + 1], vz = V[j + 2];
-  // it swims steadily wherever you aim, as fast as the bots cruise after you. Squirting ink fires the jets
-  // flat out for a few seconds: a long, fast escape the way you're looking
-  let a = 11 * dt, c = 0.5 + 0.5 * sin(F[TIME] * 7);
-  if (PL.boost > 0) { PL.boost -= dt; a = 48 * dt; c = 0.5 + 0.5 * sin(F[TIME] * 22); }
-  vx += fx * a; vy += fy * a; vz += fz * a;
-  cn[i] = c;
-  const dr = exp(-1.3 * dt); vTmp[0] = vx * dr; vTmp[1] = vy * dr; vTmp[2] = vz * dr;
-  glide(i, vTmp, fx, fy, fz, dt, min(1, dt * 4));
+  // your podGAN drifts with the swarm like any other (swim() moves it). Squirting ink fires its jets flat out for
+  // a moment: a fast escape the way you're looking
+  if (PL.boost > 0) jetOut(i, fx, fy, fz, dt, (PL.boost -= dt));
   const px = P[j], py = P[j + 1], pz = P[j + 2];
   // camera: behind and above (the aim starts 35 degrees down), flying over after a jump, pulled in by rock
   const tx = px + U[j] * s * 8, ty = py + U[j + 1] * s * 8, tz = pz + U[j + 2] * s * 8, kc = PL.snap ? 1 : min(1, dt * 6);
@@ -1025,16 +1047,6 @@ function wildNear(i, fn) {
   }
   return best;
 }
-function drive(i, dx, dy, dz, th, dt) {
-  const { P, V, cn } = SW, j = i * 3, h = SW.g[i].size * 8;
-  let l = hypot(dx, dy, dz) || 1; dx /= l; dy /= l; dz /= l;
-  if (sdAt(P[j] + dx * 2.5, P[j + 1] + h + dy * 2.5, P[j + 2] + dz * 2.5) > -1) { dy += 0.9; l = hypot(dx, dy, dz); dx /= l; dy /= l; dz /= l; } // rock ahead: go over it
-  if (P[j + 1] > -4 && dy > 0) dy = -0.2;
-  const a = 11 * th * dt, dr = exp(-1.3 * dt);
-  vTmp[0] = (V[j] + dx * a) * dr; vTmp[1] = (V[j + 1] + dy * a) * dr; vTmp[2] = (V[j + 2] + dz * a) * dr;
-  cn[i] = th > 0.6 ? 0.5 + 0.5 * sin(F[TIME] * 16 + i) : cn[i] * exp(-dt * 3);
-  glide(i, vTmp, dx, dy * 0.5, dz, dt, min(1, dt * 3));
-}
 function bots(dt) {
   const S = NET.solo; if (!S) return;
   S.game.tick();
@@ -1044,37 +1056,35 @@ function bots(dt) {
     const p = NET.players.get(id); if (!p || SW.own[p.pod] !== id) continue;
     const i = p.pod, j = i * 3;
     b.hop -= dt; b.ink -= dt; b.wt -= dt;
-    if (b.boost > 0) { b.boost -= dt; drive(i, ...b.bd, 48 / 11, dt); continue; } // inked: jets flat out, straight away
-    let dx = 0, dy = 0, dz = 0, th = 0;
+    if (b.boost > 0) { jetOut(i, ...b.bd, dt, (b.boost -= dt)); continue; } // inked: jets flat out, straight away
+    let dx = 0, dy = 0, dz = 0;
     if (play && isIt(id)) {
       // hunt the nearest free podGAN; close enough for a moment, and it jumps in (and sometimes misses)
       let tq = -1, ti = -1, td = 1e9;
       for (const [q, qi] of who) if (!isIt(q)) { const d = dist(i, qi); if (d < td) { td = d; ti = qi; tq = q; } }
       if (ti >= 0) {
-        const k = ti * 3; dx = P[k] - P[j]; dy = P[k + 1] - P[j + 1]; dz = P[k + 2] - P[j + 2]; th = 1;
         if (td < 13) { b.lock += dt; if (b.lock > b.need) { if (Math.random() < 0.7) S.game.jump(id, ti); b.lock = 0; b.need = 0.6 + Math.random() * 1.4; } }
         else b.lock = max(0, b.lock - dt);
         // far away: body-hop into a wild podGAN close to the target
-        if (td > 32 && b.hop <= 0) { const c = wildNear(i, (c) => -dist(c, ti)); if (c >= 0 && dist(c, ti) < td - 12) S.game.jump(id, c); b.hop = 3 + Math.random() * 4; }
+        if (td > 13 && b.hop <= 0) { const c = wildNear(i, (c) => -dist(c, ti)); if (c >= 0 && dist(c, ti) < td - 12) S.game.jump(id, c); b.hop = 1.5 + Math.random() * 2.5; }
       }
     } else if (play) {
       // run from the nearest hunter, hop away when it gets close, ink when it's right there
       let hi = -1, hd = 1e9;
       for (const [q, qi] of who) if (isIt(q)) { const d = dist(i, qi); if (d < hd) { hd = d; hi = qi; } }
       if (hi >= 0 && hd < 30) {
-        const k = hi * 3; dx = P[j] - P[k]; dy = (P[j + 1] - P[k + 1]) * 0.5; dz = P[j + 2] - P[k + 2]; th = 1;
-        if (b.wt <= 0) { b.wd = [Math.random() - 0.5, (Math.random() - 0.5) * 0.4, Math.random() - 0.5]; b.wt = 1 + Math.random() * 2; }
-        const l = hypot(dx, dy, dz) || 1; dx = dx / l + b.wd[0] * 0.8; dy = dy / l + b.wd[1]; dz = dz / l + b.wd[2] * 0.8;
-        if (hd < 12 && b.hop <= 0) { const c = wildNear(i, (c) => dist(c, hi)); if (c >= 0 && dist(c, hi) > hd + 8) S.game.jump(id, c); b.hop = 4 + Math.random() * 5; }
-        if (hd < 9 && b.ink <= 0 && S.game.ink(id)) { addInk(...inkAt(i, dx, dy, dz)); b.ink = INK_GAP; b.boost = 2.6; b.bd = [dx, dy, dz]; }
+        const k = hi * 3; dx = P[j] - P[k]; dy = (P[j + 1] - P[k + 1]) * 0.5; dz = P[j + 2] - P[k + 2];
+        if (hd < 20 && b.hop <= 0) { const c = wildNear(i, (c) => dist(c, hi)); if (c >= 0 && dist(c, hi) > hd + 8) S.game.jump(id, c); b.hop = 4 + Math.random() * 5; }
+        if (hd < 9 && b.ink <= 0) botInk(id, b, i, dx, dy, dz);
       }
     }
-    if (!th) { // nothing to do: cruise around
-      if (b.wt <= 0) { b.wd = [Math.random() - 0.5, (Math.random() - 0.5) * 0.3, Math.random() - 0.5]; b.wt = 3 + Math.random() * 4; if (hypot(P[j], P[j + 2]) > 110) b.wd = [-P[j], 0, -P[j + 2]]; }
-      [dx, dy, dz] = b.wd; th = 0.4;
-    }
-    drive(i, dx, dy, dz, th, dt);
   }
+}
+// bot id squirts ink and jets away along (dx, dy, dz)
+function botInk(id, b, i, dx, dy, dz) {
+  if (!NET.solo.game.ink(id)) return false;
+  addInk(...inkAt(i, dx, dy, dz)); b.ink = INK_GAP; b.boost = ESCAPE; b.bd = [dx, dy, dz];
+  return true;
 }
 function game(dt) {
   // other players' podGANs glide toward what they last reported
@@ -1086,6 +1096,7 @@ function game(dt) {
     cn[p.pod] = m.c;
   }
   bots(dt);
+  hunterBeep(dt);
   if (resEl.className) { const e = resEl.querySelector('i'); if (e) e.textContent = max(0, Math.ceil((NET.next - performance.now()) / 1000)); }
   if ($('sb').className) drawScores();
   if (!NET.online) return;
