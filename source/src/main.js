@@ -725,40 +725,80 @@ function become(i, snap) {
 }
 
 // ---------------------------------------------------------------- the route
-// The same ride every lap: a smooth loop round the garden through 8 waypoints. Each waypoint is the home of the wild
-// podGAN nearest a point on a 42 m circle (homes are always open water); the loop between them is a Catmull-Rom
-// spline, lifted wherever it would pass through rock, sampled every half metre.
+// The same ride every lap: a smooth loop round the garden through open water, at least 3 m from any rock.
 const LAP_S = 60, ROUTE = []; // [x, y, z] every STEP metres
 let SPEED = 4; // metres a second: set so a lap takes LAP_S seconds
 const STEP = 0.5;
+// 26 directions round a point
+const DIRS = []; for (let a = -1; a <= 1; a++) for (let b = -1; b <= 1; b++) for (let c = -1; c <= 1; c++) if (a || b || c) { const l = hypot(a, b, c); DIRS.push([a / l, b / l, c / l]); }
+const rock = (x, y, z) => y > -2.5 || sdAt(x, y, z) > -0.55; // rock, or too near the surface
+// how much room there is round a point: the share of probes 3 and 6 m out that are open water
+const room = (x, y, z) => { let n = 0; for (const [a, b, c] of DIRS) { if (!rock(x + a * 3, y + b * 3, z + c * 3)) n++; if (!rock(x + a * 6, y + b * 6, z + c * 6)) n++; } return n / 52; };
+// The loop is found on a polar grid round the middle of the garden: at each of 72 angles, a distance out (24-72 m)
+// and a depth (-30 to -10 m) with the most open water round it. A closed path through the grid is picked that is
+// most open overall while changing distance only gradually (dynamic programming), then it is smoothed, pushed
+// clear of any rock still within 6 m, and smoothed again.
 function course() {
   if (ROUTE.length) return;
-  const W8 = [];
-  for (let k = 0; k < 8; k++) {
-    const a = k / 8 * 6.2832, x = cos(a) * 42, z = sin(a) * 42;
-    let bi = 0, bd = 1e9;
-    for (let i = 0; i < NPOD; i++) { const d = (SW.home[i * 3] - x) ** 2 + (SW.home[i * 3 + 2] - z) ** 2; if (d < bd) { bd = d; bi = i; } }
-    W8.push([SW.home[bi * 3], SW.home[bi * 3 + 1], SW.home[bi * 3 + 2]]);
-  }
-  // dense points along the spline, then resampled evenly by distance
-  const dense = [];
-  for (let k = 0; k < 8; k++) {
-    const p0 = W8[(k + 7) % 8], p1 = W8[k], p2 = W8[(k + 1) % 8], p3 = W8[(k + 2) % 8];
-    for (let t = 0; t < 1; t += 0.01) {
-      const t2 = t * t, t3 = t2 * t, c = (a, b, cc, d) => 0.5 * (2 * b + (cc - a) * t + (2 * a - 5 * b + 4 * cc - d) * t2 + (3 * b - a - 3 * cc + d) * t3);
-      const q = [c(p0[0], p1[0], p2[0], p3[0]), c(p0[1], p1[1], p2[1], p3[1]), c(p0[2], p1[2], p2[2], p3[2])];
-      for (let up = 0; up < 20 && sdAt(q[0], q[1], q[2]) > -0.4; up++) q[1] += 0.75; // over the rock, not through it
-      q[1] = min(q[1], -3);
-      dense.push(q);
+  const NA = 72, RS = [], YS = [-30, -26, -22, -18, -14, -10];
+  for (let r = 24; r <= 72; r += 3) RS.push(r);
+  const NR = RS.length, sc = [], yy = [];
+  for (let a = 0; a < NA; a++) {
+    const th = a / NA * 6.2832; sc.push([]); yy.push([]);
+    for (let r = 0; r < NR; r++) {
+      let bs = -1e9, by = -20;
+      for (const y of YS) { const v = room(cos(th) * RS[r], y, sin(th) * RS[r]) * 10 - abs(y + 22) * 0.04; if (v > bs) { bs = v; by = y; } }
+      sc[a].push(bs); yy[a].push(by);
     }
   }
-  dense.push(dense[0]);
-  // smooth out the lifts a little
-  for (let pass = 0; pass < 3; pass++) for (let k = 1; k < dense.length - 1; k++) dense[k][1] = max(dense[k][1], (dense[k - 1][1] + dense[k][1] * 2 + dense[k + 1][1]) / 4);
-  ROUTE.push(dense[0].slice());
+  // best closed path: for each starting distance, walk round the angles moving at most 2 steps out or in each time
+  let best = null;
+  for (let r0 = 0; r0 < NR; r0++) {
+    let cost = RS.map((_, r) => r === r0 ? -sc[0][r] : 1e9); const from = [];
+    for (let a = 1; a < NA; a++) {
+      const nc = [], fr = [];
+      for (let r = 0; r < NR; r++) {
+        let bc = 1e9, bf = 0;
+        for (let q = max(0, r - 2); q <= min(NR - 1, r + 2); q++) { const c = cost[q] + abs(r - q) * 1.5; if (c < bc) { bc = c; bf = q; } }
+        nc.push(bc - sc[a][r]); fr.push(bf);
+      }
+      cost = nc; from.push(fr);
+    }
+    // back round to the start
+    let bc = 1e9, br = 0; for (let q = max(0, r0 - 2); q <= min(NR - 1, r0 + 2); q++) { const c = cost[q] + abs(r0 - q) * 1.5; if (c < bc) { bc = c; br = q; } }
+    if (!best || bc < best[0]) { const path = [br]; for (let a = NA - 2; a >= 0; a--) path.unshift(from[a][path[0]]); best = [bc, path]; }
+  }
+  // distance and depth at each angle, smoothed round the loop
+  const sm = (v, w, n) => { for (let it = 0; it < n; it++) v = v.map((_, k) => { let t = 0; for (let o = -w; o <= w; o++) t += v[(k + o + NA) % NA]; return t / (2 * w + 1); }); return v; };
+  const rr = sm(best[1].map((r) => RS[r]), 3, 4), ry = sm(best[1].map((r, a) => yy[a][r]), 4, 6);
+  // dense points: 8 between grid angles
+  let pts = [];
+  for (let a = 0; a < NA; a++) for (let t = 0; t < 1; t += 1 / 8) {
+    const b = (a + 1) % NA, th = (a + t) / NA * 6.2832, r = rr[a] + (rr[b] - rr[a]) * t, y = ry[a] + (ry[b] - ry[a]) * t;
+    const q = [cos(th) * r, y, sin(th) * r];
+    for (let up = 0; up < 40 && sdAt(q[0], q[1], q[2]) > -0.55; up++) q[1] += 0.75;
+    pts.push(q);
+  }
+  const n = pts.length, nb = (k, o) => pts[(k + o + n) % n];
+  for (let it = 0; it < 160; it++) {
+    const push = true, nx = [], w = 8;
+    for (let k = 0; k < n; k++) {
+      const [x, y, z] = pts[k]; let px = 0, py = 0, pz = 0;
+      if (push && sdAt(x, y, z) > -0.55) { nx.push([x, y + 0.5, z]); continue; }
+      if (push) for (const [a, b, c] of DIRS) for (const r of [1.5, 3, 4.5, 6]) if (rock(x + a * r, y + b * r, z + c * r)) { const w = (7 - r) / 5; px -= a * w; py -= b * w * 0.5; pz -= c * w; }
+      const l = hypot(px, py, pz), mv = l > 0 ? min(0.4, l * 0.1) / l : 0;
+      let sx = 0, sy = 0, sz = 0; for (let o = -w; o <= w; o++) { if (!o) continue; const q = nb(k, o); sx += q[0]; sy += q[1]; sz += q[2]; }
+      const ks = 0.4, m2 = 2 * w, q = [x + px * mv + (sx / m2 - x) * ks, y + py * mv + (sy / m2 - y) * ks, z + pz * mv + (sz / m2 - z) * ks];
+      nx.push(push || room(q[0], q[1], q[2]) >= 0.8 ? q : [x, y, z]);
+    }
+    pts = nx;
+  }
+  for (const q of pts) q[1] = min(q[1], -3);
+  pts.push(pts[0]);
+  ROUTE.push(pts[0].slice());
   let carry = 0;
-  for (let k = 1; k < dense.length; k++) {
-    const a = dense[k - 1], b = dense[k], l = hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+  for (let k = 1; k < pts.length; k++) {
+    const a = pts[k - 1], b = pts[k], l = hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
     let d = STEP - carry;
     while (d <= l) { const t = d / l; ROUTE.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]); d += STEP; }
     carry = l - (d - STEP);
