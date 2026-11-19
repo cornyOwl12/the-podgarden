@@ -728,8 +728,8 @@ function become(i, snap) {
     const j = o * 3, l = hypot(V[j], V[j + 1], V[j + 2]); if (l > 0.1) { H[j] = V[j] / l; H[j + 1] = V[j + 1] / l * 0.6; H[j + 2] = V[j + 2] / l; }
   }
   PL.pod = i; own[i] = NET.id; PL.snap = !!snap; PL.pt = -1;
-  // face the way the new body faces
-  const j = i * 3; F[YAW] = atan2(SW.L[j], -SW.L[j + 2]); F[PIT] = -0.6;
+  // jumping body to body keeps the view pointing the same way; only a fresh start faces the way the new body faces
+  if (o < 0) { const j = i * 3; F[YAW] = atan2(SW.L[j], -SW.L[j + 2]); F[PIT] = -0.6; }
 }
 // podGAN vi buds off the side of podGAN i, and the two push apart
 function split(i, vi) {
