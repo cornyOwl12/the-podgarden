@@ -645,10 +645,11 @@ function packSwarm() {
   const far = 85 * det, tx = TANH * W / H; let n = 0;
   // every other player's podGAN gets a glowing outline: red while IT, gold while still free
   const outl = new Map();
-  for (const [id, p] of NET.players) if (id !== NET.id && SW.own[p.pod] === id) outl.set(p.pod, NET.its.has(id) ? 2 : 3);
+  // ...and while your sonar has found it, it shows through everything
+  for (const [id, p] of NET.players) if (id !== NET.id && SW.own[p.pod] === id) outl.set(p.pod, (NET.its.has(id) ? 2 : 3) + (F[TIME] - (seen.get(id) ?? -1e9) < SEEN ? 2 : 0));
   for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
     const dx = P[j] - cx, dy = P[j + 1] - cy, dz = P[j + 2] - cz, d = hypot(dx, dy, dz), G = g[i], r = G.size * 26;
-    if (d > far + r) continue;
+    if (d > far + r && !outl.has(i)) continue;
     const z = dx * fx + dy * fy + dz * fz;
     if (z < -r || abs(dx * rx + dz * rz) - r > z * tx + r || abs(dx * ux + dy * uy + dz * uz) - r > z * TANH + r) continue;
     // the face direction must not be parallel to the body axis
@@ -667,7 +668,8 @@ function packSwarm() {
 // ============================================================================ the game: podGAN tag
 // You are a podGAN: one of the swarm, seen from behind and above, drawn as a wireframe so you can see through
 // yourself. The mouse aims; tap Space for one squid jet, hold it for full jets. Right-click squirts a big cloud of
-// ink (once a minute). Left-click jumps you into the podGAN in the middle of your view.
+// ink (once a minute). Left-click jumps you into the podGAN in the middle of your view, or, aimed at open water,
+// sends a sonar ping (every 5 s) that shows nearby players through everything for a moment.
 // The rules are in tag.js: one player is IT and hunts the rest. Jumping into a free player's podGAN catches them:
 // they become IT too and the podGAN splits in two, one for each of you. When everyone is IT the round is over, the
 // last one caught wins, and a new round starts with everyone in a random podGAN. Other players glow: red when IT,
@@ -676,8 +678,11 @@ function packSwarm() {
 // file, GitHub Pages, or alone on the server) you play against 7 bots, with the same rules running in the browser.
 const NET = { ws: null, id: 0, host: true, online: false, solo: null, players: new Map(), its: new Set(), at: new Map(), tags: new Map(),
   state: 'wait', n: 0, t0: 0, next: 0, res: null, sendT: 0, podT: 0 };
-const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0 };
+const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9 };
 const INK_GAP = 60, INK_LIFE = 14;
+// sonar: left-click open water to ping. Players within PING_R metres show through everything for SEEN seconds
+const PING_GAP = 5, PING_R = 70, SEEN = 3;
+const seen = new Map(); // player id -> when your sonar found them
 const inks = []; // { x, y, z, t, seed }
 const feedEl = $('feed'), nsEl = $('ns'), nmEl = $('nm'), tagEl = $('n'), itEl = $('itb'), lblEl = $('lbl'), inkEl = $('ink'), resEl = $('res');
 try { nmEl.value = localStorage.podName || ''; } catch {}
@@ -761,6 +766,7 @@ function netMsg(m) {
     case 'host': NET.host = m.id === NET.id; countMsg(); break;
     case 'wait': NET.state = 'wait'; if (NET.online && !P.size) soloStart(); drawIt(); break;
     case 'round': {
+      seen.clear();
       if (!m.local && NET.solo) soloStop();
       NET.state = 'play'; NET.n = m.n; NET.t0 = performance.now(); resEl.className = '';
       NET.its = new Set([m.it]); NET.at.clear(); NET.tags.clear();
@@ -895,6 +901,29 @@ function jump() {
   if (NET.solo) { const why = NET.solo.game.jump(NET.id, i); if (why) feed(why); }
   else netSend({ t: 'jump', i });
 }
+// sonar ping: a ring sweeps out from the middle of the screen and finds every other player close by
+let pingAC = null;
+function ping() {
+  if (PL.pod < 0) return;
+  const wait = PING_GAP - (F[TIME] - PL.pingT);
+  if (wait > 0) { feed(`Sonar recharging · ${Math.ceil(wait)} s`); return; }
+  PL.pingT = F[TIME];
+  const j = PL.pod * 3; let n = 0;
+  for (const [id, p] of NET.players) {
+    if (id === NET.id || SW.own[p.pod] !== id) continue;
+    const k = p.pod * 3;
+    if (hypot(SW.P[k] - SW.P[j], SW.P[k + 1] - SW.P[j + 1], SW.P[k + 2] - SW.P[j + 2]) < PING_R) { seen.set(id, F[TIME]); n++; }
+  }
+  feed(n ? `📡 Sonar found ${n} podGAN${n > 1 ? 's' : ''} nearby` : '📡 Sonar: nobody nearby');
+  const r = document.createElement('i'); r.className = 'ping'; document.body.append(r); setTimeout(() => r.remove(), 1300);
+  try {
+    pingAC ??= new AudioContext();
+    const t = pingAC.currentTime, o = pingAC.createOscillator(), gn = pingAC.createGain();
+    o.frequency.setValueAtTime(1500, t); o.frequency.exponentialRampToValueAtTime(700, t + .9);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(.25, t + .02); gn.gain.exponentialRampToValueAtTime(.0001, t + 1.2);
+    o.connect(gn).connect(pingAC.destination); o.start(t); o.stop(t + 1.3);
+  } catch {}
+}
 function addInk(x, y, z) { inks.push({ x, y, z, t: 0, seed: Math.random() * 100 }); if (inks.length > NINK) inks.shift(); }
 // ink squirts out behind a podGAN (dx, dy, dz: the way it faces)
 function inkAt(i, dx, dy, dz) {
@@ -951,8 +980,9 @@ const vTmp = [0, 0, 0];
 function pilot(dt) {
   for (let k = inks.length - 1; k >= 0; k--) if ((inks[k].t += dt) > INK_LIFE) inks.splice(k, 1);
   const iw = INK_GAP - (F[TIME] - PL.inkT);
-  inkEl.textContent = iw > 0 ? `🦑 Ink refills in ${Math.ceil(iw)} s` : '🦑 Ink ready · right-click';
-  inkEl.className = iw > 0 ? '' : 'ok';
+  const pw = PING_GAP - (F[TIME] - PL.pingT);
+  inkEl.innerHTML = (iw > 0 ? `🦑 Ink refills in ${Math.ceil(iw)} s` : '<b>🦑 Ink ready · right-click</b>') + '<br>' +
+    (pw > 0 ? `📡 Sonar recharging · ${Math.ceil(pw)} s` : '<b>📡 Sonar ready · left-click open water</b>');
   const i = PL.pod; if (i < 0) return;
   const { P, V, U, cn } = SW, j = i * 3, s = SW.g[i].size;
   const cp = cos(F[PIT]), fx = cp * sin(F[YAW]), fy = sin(F[PIT]), fz = -cp * cos(F[YAW]);
@@ -981,7 +1011,7 @@ function pilot(dt) {
   // what's in the middle of the view
   if (PL.tgt >= 0) {
     const o = SW.own[PL.tgt], pl = o >= 0 && o !== NET.id ? NET.players.get(o) : null;
-    tagEl.textContent = pl ? `${pl.name}${isIt(o) ? ' · IT' : ' · free'} · ${isIt(NET.id) && !isIt(o) && NET.state === 'play' ? 'click to catch!' : 'a player'}` : `${podName(PL.tgt)} · click to jump in`;
+    tagEl.textContent = pl ? `${isIt(o) ? `${pl.name} · IT` : 'a free podGAN'} · ${isIt(NET.id) && !isIt(o) && NET.state === 'play' ? 'click to catch!' : 'a player'}` : `${podName(PL.tgt)} · click to jump in`;
     tagEl.className = 'v' + (pl ? ' pl' : '');
   } else tagEl.className = '';
   $('x').className = PL.tgt >= 0 ? 'on' : '';
@@ -1074,7 +1104,7 @@ function labels() {
   let n = 0;
   const cx = F[CX], cy = F[CY], cz = F[CZ], asp = W / H;
   for (const [id, p] of NET.players) {
-    if (SW.own[p.pod] !== id) continue;
+    if (SW.own[p.pod] !== id || !isIt(id)) continue; // only the hunters are named: the hunted stay anonymous
     const j = p.pod * 3, s = SW.g[p.pod].size, x = SW.P[j] + SW.U[j] * s * 22 - cx, y = SW.P[j + 1] + SW.U[j + 1] * s * 22 - cy, z0 = SW.P[j + 2] + SW.U[j + 2] * s * 22 - cz;
     const z = x * F[FX] + y * F[FY] + z0 * F[FZ]; if (z < 0.5 || z > 90) continue;
     const sx = (x * F[RX] + z0 * F[RZ]) / (z * TANH * asp), sy = (x * F[UX] + y * F[UY] + z0 * F[UZ]) / (z * TANH);
@@ -1156,7 +1186,7 @@ addEventListener('keydown', (e) => {
   if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1);
 });
 addEventListener('keyup', (e) => { if (e.code === 'Tab') $('sb').className = ''; });
-addEventListener('mousedown', (e) => { if (menu || document.pointerLockElement !== canvas) return; if (e.button === 0) jump(); else if (e.button === 2) squirt(); });
+addEventListener('mousedown', (e) => { if (menu || document.pointerLockElement !== canvas) return; if (e.button === 0) { if (PL.tgt >= 0) jump(); else ping(); } else if (e.button === 2) squirt(); });
 addEventListener('contextmenu', (e) => { if (!menu) e.preventDefault(); });
 addEventListener('keyup', (e) => key(e, 0));
 const release = () => { kf = kb = kl = kr = ku = kd = ks = kj = 0; tId = -1; tN = 0; };

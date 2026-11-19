@@ -144,7 +144,9 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 #sb p.it { color: #ff6b6b; }
 #sb b { color: #7ff3ff; font-weight: 400; }
 #ink { position: absolute; left: 1.2em; bottom: 1.2em; font: .9em ui-monospace, Consolas, monospace; color: #e8fbff99; text-shadow: 0 1px 4px #000; }
-#ink.ok { color: #9ff6ff; }
+#ink b { color: #9ff6ff; font-weight: normal; }
+.ping { position: fixed; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px; border-radius: 50%; border: 3px solid #9ff6ff; box-shadow: 0 0 18px #9ff6ff, inset 0 0 12px #9ff6ff; pointer-events: none; animation: ping 1.2s ease-out forwards; }
+@keyframes ping { to { transform: scale(120); opacity: 0; border-width: .2px; } }
 /* end of a round: last one caught first, the winner in gold */
 #res { position: absolute; left: 50%; top: 14%; transform: translateX(-50%); min-width: 30em; padding: 1.2em 1.6em; border-radius: .8em; background: #03131cee;
   box-shadow: 0 0 0 2px #ffd75e80, 0 0 3em #000c; font: .95em/2 ui-monospace, Consolas, monospace; color: #e8fbff; display: none; pointer-events: none; text-align: left; }
@@ -176,6 +178,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
           <i><b>Mouse</b></i>Aim
           <i><b>Space</b></i>Jet · hold for full jets
           <i><b>Left click</b></i>Jump into a podGAN · catch a player
+          <i><b>Left click</b> open water</i>Sonar ping: shows players nearby (every 5 s)
           <i><b>Right click</b></i>Squirt ink (once a minute)
         </p>
         <p>

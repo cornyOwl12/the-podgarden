@@ -891,8 +891,8 @@ struct FO { @location(0) c: vec4f, @builtin(frag_depth) d: f32 };
 // it swims: a.xyz position, a.w cell size, b.xyz its up axis (the way its body leads), c.xyz the way its face looks,
 // c.w how far it has contracted for the next jet (0..1).
 const W_SWARM = S_B + /*wgsl*/`
-const SG = vec3f(32., 32., 8.);
-const SPV = vec3f(16., 12., 4.);
+const SG = vec3f(28., 32., 28.);
+const SPV = vec3f(14., 12., 14.);
 struct VO { @builtin(position) cp: vec4f, @location(0) wp: vec3f, @location(1) @interpolate(flat) a: vec4f, @location(2) @interpolate(flat) b: vec4f, @location(3) @interpolate(flat) c: vec4f };
 fn pcg(v: u32) -> u32 { let s = v * 747796405u + 2891336453u; let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
 fn ih(s: u32, k: u32) -> f32 { return f32(pcg(pcg(s) + k) >> 8u) / 16777216.; }
@@ -946,9 +946,12 @@ fn accCol(G: Gn, k: f32, tq: f32) -> vec3f {
 fn faceCol(G: Gn) -> vec3f { return hsv(G.fh, .85, select(.5, .35, G.ad == 6)); }
 fn basis(b: vec4f, c: vec4f) -> mat3x3f { let u = normalize(b.xyz); let f = normalize(c.xyz - u * dot(c.xyz, u)); return mat3x3f(cross(u, f), u, f); }
 const CUBE = array<u32, 36>(0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5);
+// how many cells thick an outline is: about 3 pixels, at least 1 cell
+fn opad(a: vec4f) -> f32 { return clamp(ceil(3. * 2. * length(a.xyz - g.cam.xyz) * g.up.w * g.res.w / a.w), 1., 6.); }
 @vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f, @location(2) c: vec4f) -> VO {
   let k = CUBE[vi];
-  let pad = select(0., 1., u32(b.w + .5) >= 4096u); // outlined podGANs get a box one cell bigger all round
+  // outlined podGANs get a bigger box, room for an outline that stays a few pixels thick however far away
+  let pad = select(0., opad(a), u32(b.w + .5) >= 4096u);
   let l = vec3f(f32(k & 1u), f32((k >> 1u) & 1u), f32(k >> 2u)) * (SG + 2. * pad) - pad;
   var o: VO;
   o.wp = a.xyz + basis(b, c) * ((l - SPV) * a.w);
@@ -956,93 +959,91 @@ const CUBE = array<u32, 36>(0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4
   o.a = a; o.b = b; o.c = c;
   return o;
 }
-// what fills cell c: rgb, and w = 0 empty, 1 body, 2 eye white, 3 pupil. lc: the camera in cell coordinates
+// what fills cell c: rgb, and w = 0 empty, 1 body, 2 eye white, 3 pupil. lc: the camera in cell coordinates.
+// A podGAN is round, with no front or back: a domed cylinder standing on its body axis (y), rings of eyes all
+// the way round near the top, stubby arms spaced around its sides and a ring of legs trailing underneath.
 fn cell(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> vec4f {
   let fr = floor((g.cam.w + G.ph) * 10.); let tq = fr * .1; // 10 frames a second, like the GIFs
   let fs = f32(G.s % 9973u);
   let m = sin(tq * TAU / G.per + G.ph);
-  let hw = max(round(G.bw + m * G.st - cn * 1.5), 2.);   // half-width in cells
-  let split = G.ad == 3 && hw >= 6.;
+  let hw = clamp(round((G.bw + m * G.st) * .8 - cn * 1.5), 2., 10.);   // radius in cells
   let es = G.es; let ep = es + 1.;
   let glitch = step(1. - G.gr, hf(floor(tq * 2.) + fs));
-  let cx = c.x - 15.5 + glitch * round((hf(c.y + fr + fs) - .5) * 4.);
-  let ax = abs(cx);
-  // a splitting one is two heads side by side
-  let fhw = select(hw, floor((hw - 1.) / 2.), split);
-  let fcx = select(cx, ax - fhw - 1., split);
-  let fax = abs(fcx);
-  let nm = max(1., floor((2. * fhw - 1.) / ep));
-  let R = min(G.rmax, ceil(G.ne / nm));
+  let dx = c.x - 13.5 + glitch * round((hf(c.y + fr + fs) - .5) * 4.);
+  let dz = c.z - 13.5;
+  let q = vec2f(dx, dz);
+  let rr = length(q);
+  let an = fract(atan2(dz, dx) / TAU + 1.);            // 0..1 once round
+  let R = clamp(ceil(G.ne / 4.), 1., G.rmax);           // rings of eyes
   let yb = 12.;
   let yt = min(yb + 6. + R * ep + round(-m * 1.5), 31.);
   let top = yt - 3.;
-  let tone = fract(cx / (hw * 2.) + c.y * .035 + tq * .12 + G.h1);
-  // legs: where leg i hangs, pulled together while it contracts
-  // no wider than the body allows (a narrow one shows fewer of its legs)
-  let nle = min(G.nl, hw + 1.);
-  let sq = 1. - .3 * cn; let hn = (nle - 1.) * .5;
-  let li = round((cx / sq) * .5 + hn);
-  let onLeg = li >= 0. && li < nle && cx == floor((li - hn) * 2. * sq) + .5;
+  let tone = fract(an * 2. + c.y * .035 + tq * .12 + G.h1);
+  // legs: a ring of them, pulled in while it contracts (a thin one has room for fewer)
+  let nle = min(G.nl, max(3., floor(TAU * hw / 2.5)));
+  let sq = 1. - .3 * cn;
+  let li = round(an * nle) % nle;
+  let la = li / nle * TAU;
+  let lp = vec2f(cos(la), sin(la)) * max(hw - 1.5, 1.) * sq + (vec2f(hf(li + fr * .5 + fs), hf(li * 1.7 + fr * .5 + fs)) - .5) * .8;
+  let onLeg = length(q - lp) < .75;
   if (c.y >= yb && c.y < yt) {
     let dt = yt - 1. - c.y;
     var ins = select(select(select(0., 1., dt == 1.), 2., dt == 0.), select(select(select(0., 1., dt == 2.), 2., dt == 1.), 3., dt == 0.), G.ty == 6);
-    ins += select(0., 1., c.y == yb) + step(1. - G.fl, hf(c.y * 7.1 + fr + fs + sign(cx)));
-    let edge = fax > fhw - ins - 1.;
-    if (fax < fhw - ins && c.z >= 1. && c.z <= 6. && !(edge && (c.z == 1. || c.z == 6.))) {
-      if (c.z == 6.) {
-        // the face: a frame around the grid of eyes
-        if (c.y <= top + 1. && c.y >= top - R * ep + 1. && fax <= min(nm, G.ne) * ep * .5 + .5) {
-          let ry = floor((top - c.y) / ep);
-          let n = clamp(G.ne - ry * nm, 0., nm);
-          let ex = floor(fcx + n * ep * .5);
-          let col = floor(ex / ep); let lx = ex - col * ep; let ly = (top - c.y) - ry * ep;
-          if (ry >= 0. && col >= 0. && col < n && lx < es && ly < es) { return vec4f(1.); }
-          return vec4f(faceCol(G), 1.);
-        }
+    ins += select(0., 1., c.y == yb) + step(1. - G.fl, hf(c.y * 7.1 + fr + fs + floor(an * 6.)));
+    let Rb = hw - ins;
+    // the eyes: each ring goes all the way round, evenly spaced, every other ring turned half a step
+    let circ = TAU * hw;
+    let nr = clamp(floor(circ / (ep + 1.)), 3., 14.); let sp = circ / nr;
+    let ey = top - c.y; let ry = floor(ey / ep); let ly = ey - ry * ep;
+    let u = an * circ + ry * sp * .5;
+    let col = floor(u / sp); let lu = u - col * sp - (sp - es) * .5; let lx = floor(lu);
+    let band = ey >= -1. && ry < R;
+    let isEye = ey >= 0. && ry < R && lx >= 0. && lx < es && ly < es;
+    if (rr < Rb) {
+      if (rr > Rb - 1.6) {
+        // the face colour frames each eye
+        if (band && lu >= -1. && lu < es + 1. && (ly < es || ey < 0.)) { return vec4f(faceCol(G), 1.); }
         // the dark sockets where the legs join
-        if (G.root > 0. && (c.y == yb + 1. || c.y == yb + 2.) && onLeg) { return vec4f(faceCol(G), 1.); }
+        if (G.root > 0. && (c.y == yb + 1. || c.y == yb + 2.) && abs(fract(an * nle + .5) - .5) * circ / nle < .8) { return vec4f(faceCol(G), 1.); }
       }
       return vec4f(select(bodyCol(G, tone, tq), accCol(G, 0., tq), dt <= 1. && G.mode != 2), 1.);
     }
-    // eyes, one cell proud of the face
-    if (c.z == 7. && c.y <= top && c.y >= top - R * ep + 1. && fax < fhw - ins) {
-      let ry = floor((top - c.y) / ep);
-      let n = clamp(G.ne - ry * nm, 0., nm);
-      let ex = floor(fcx + n * ep * .5);
-      let col = floor(ex / ep); let lx = ex - col * ep; let ly = (top - c.y) - ry * ep;
-      if (col >= 0. && col < n && lx < es && ly < es) {
-        let e = col + ry * 7. + fs * .37;
-        // pupils: on the camera when it is close and in front, otherwise looking around (shifty ones dart)
-        let rel = lc - vec3f(15.5, top, 7.);
-        var pp: vec2f;
-        let shifty = G.ad == 1 && hf(e + floor(tq * 1.3)) > .5;
-        if (rel.z > 6. && dot(rel, rel) < 90000. && !shifty) {
-          pp = vec2f(1. + clamp(round(rel.x / rel.z * 4.), -1., 1.), 1. - clamp(round(rel.y / rel.z * 4.), -1., 1.));
-        } else {
-          let lk = floor(tq / select(1.6, .4, G.ad == 1) + hf(e) * 3.);
-          pp = vec2f(floor(hf(e + lk) * 2.99), floor(hf(e + lk + .5) * 2.99));
-        }
-        let ps = es - 2.; // a 3-cell eye has a 1-cell pupil, a 4-cell eye 2 cells
-        let blink = step(.97, hf(e + floor(tq * 4.))) > 0. && ly == floor(es * .5);
-        if ((lx >= pp.x && lx < pp.x + ps && ly >= pp.y && ly < pp.y + ps) || blink) { return vec4f(vec3f(.01), 3.); }
-        return vec4f(vec3f(.9), 2.);
+    // eyes, one cell proud of the body
+    if (isEye && rr < Rb + 1.) {
+      let e = col + ry * 7. + fs * .37;
+      // pupils: on the camera when it is close and on this eye's side, otherwise looking around (shifty ones dart)
+      let ea = ((col + .5) * sp - ry * sp * .5) / circ * TAU;
+      let nn = vec2f(cos(ea), sin(ea)); let tt = vec2f(-nn.y, nn.x);
+      let rel = lc - vec3f(13.5 + nn.x * hw, top - es * .5, 13.5 + nn.y * hw);
+      let fwd = dot(rel.xz, nn);
+      var pp: vec2f;
+      let shifty = G.ad == 1 && hf(e + floor(tq * 1.3)) > .5;
+      if (fwd > 6. && dot(rel, rel) < 90000. && !shifty) {
+        pp = vec2f(1. + clamp(round(dot(rel.xz, tt) / fwd * 4.), -1., 1.), 1. - clamp(round(rel.y / fwd * 4.), -1., 1.));
+      } else {
+        let lk = floor(tq / select(1.6, .4, G.ad == 1) + hf(e) * 3.);
+        pp = vec2f(floor(hf(e + lk) * 2.99), floor(hf(e + lk + .5) * 2.99));
       }
+      let ps = es - 2.; // a 3-cell eye has a 1-cell pupil, a 4-cell eye 2 cells
+      let blink = step(.97, hf(e + floor(tq * 4.))) > 0. && ly == floor(es * .5);
+      if ((lx >= pp.x && lx < pp.x + ps && ly >= pp.y && ly < pp.y + ps) || blink) { return vec4f(vec3f(.01), 3.); }
+      return vec4f(vec3f(.9), 2.);
     }
   }
-  if (c.z >= 3. && c.z <= 4.) {
-    // arms: stubs out of the sides
-    let ay = c.y - yb - 3.;
-    if (ay >= 0. && ay <= (G.na - 1.) * 2. && ay % 2. == 0. && ax >= hw - 1. && ax < hw + G.la - 1. + floor(hf(ay + sign(cx) + fr * .3 + fs) * 2.)) {
-      return vec4f(accCol(G, .3, tq), 1.);
-    }
-    // legs, wriggling, longer while it glides with them trailing
-    if (c.y < yb && onLeg) {
-      let L = G.lb + floor(ih(G.s, 21u + u32(li)) * G.lv) + floor(hf(li + fr * .5 + fs) * 2.) + round((1. - cn) * 1.5) + select(0., 5., li == G.probe && G.ad == 8);
-      if (c.y >= yb - L) {
-        let root = G.root > 0. && c.y >= yb - 2.;
-        let k = select(fract(li * .37 + tq * .3), .7, root);
-        return vec4f(select(select(bodyCol(G, fract(li / nle + tq * .1), tq), accCol(G, k, tq), G.mode == 2 || fract(li * .5) > .25), faceCol(G), root), 1.);
-      }
+  // arms: stubs out of the sides, three to a row, each row turned a little
+  let ay = c.y - yb - 3.;
+  if (ay >= 0. && ay <= (G.na - 1.) * 2. && ay % 2. == 0. && rr >= hw - 1.) {
+    let w = an * 3. - ay * .09 + .5; let k = floor(w);
+    let off = abs(fract(w) - .5) / 3. * TAU * rr;
+    if (off < .7 && rr < hw + G.la - .5 + floor(hf(ay + k + fr * .3 + fs) * 2.)) { return vec4f(accCol(G, .3, tq), 1.); }
+  }
+  // legs, wriggling, longer while it glides with them trailing
+  if (c.y < yb && onLeg) {
+    let L = G.lb + floor(ih(G.s, 21u + u32(li)) * G.lv) + floor(hf(li + fr * .5 + fs) * 2.) + round((1. - cn) * 1.5) + select(0., 5., li == G.probe && G.ad == 8);
+    if (c.y >= yb - L) {
+      let root = G.root > 0. && c.y >= yb - 2.;
+      let k = select(fract(li * .37 + tq * .3), .7, root);
+      return vec4f(select(select(bodyCol(G, fract(li / nle + tq * .1), tq), accCol(G, k, tq), G.mode == 2 || fract(li * .5) > .25), faceCol(G), root), 1.);
     }
   }
   return vec4f(0.);
@@ -1069,7 +1070,8 @@ fn crease(a: vec3f, b: vec3f, ax: i32, p: vec3f, G: Gn, lc: vec3f, cn: f32, w: f
 }
 struct FO { @location(0) c: vec4f, @builtin(frag_depth) d: f32 };
 // b.w is the podGAN's number plus 2048 x how to draw it: 0 normally, 1 as a wireframe (the one you are in),
-// 2 with a glowing red outline (another player who is IT), 3 with a gold outline (another player still free)
+// 2 with a glowing red outline (another player who is IT), 3 with a gold outline (another player still free),
+// 4 and 5 the same but found by your sonar: a ghost drawn in front of everything, so it shows through walls
 fn near(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
   return solidAt(c + vec3f(1., 0., 0.), G, lc, cn) || solidAt(c - vec3f(1., 0., 0.), G, lc, cn)
       || solidAt(c + vec3f(0., 1., 0.), G, lc, cn) || solidAt(c - vec3f(0., 1., 0.), G, lc, cn)
@@ -1078,7 +1080,12 @@ fn near(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
 @fragment fn fs(i: VO) -> FO {
   let B = basis(i.b, i.c); let s = i.a.w;
   let id = u32(i.b.w + .5); let mode = id / 2048u; let wire = mode == 1u; let outl = mode >= 2u;
-  let lo = select(vec3f(0.), vec3f(-1.), outl); let hi = SG - lo;
+  let xray = mode >= 4u; let isIt = mode == 2u || mode == 4u;
+  let P = select(0., opad(i.a), outl);
+  let lo = vec3f(-P); let hi = SG + P;
+  // the camera's right and up in cell space, to thicken a far outline across the screen
+  let rL = vec3f(dot(g.right.xyz, B[0]), dot(g.right.xyz, B[1]), dot(g.right.xyz, B[2]));
+  let uL = vec3f(dot(g.up.xyz, B[0]), dot(g.up.xyz, B[1]), dot(g.up.xyz, B[2]));
   let G = genome(id % 2048u);
   let rd = normalize(i.wp - g.cam.xyz);
   let dc = g.cam.xyz - i.a.xyz;
@@ -1130,12 +1137,19 @@ fn near(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
   // outlined: the ray that misses the body but passes through a cell touching it draws the outline there, so
   // only the outside edge of the silhouette lights up, like cel shading
   var oT = -1.;
-  for (var k = 0; k < 84; k++) {
+  for (var k = 0; k < 128; k++) {
     if (all(c >= vec3f(0.)) && all(c < SG)) {
       f = cell(c, G, ro, i.c.w);
       if (f.w > 0.) { break; }
     }
-    if (outl && oT < 0. && near(c, G, ro, i.c.w)) { oT = te; }
+    if (outl && oT < 0.) {
+      if (near(c, G, ro, i.c.w)) { oT = te; }
+      else if (P > 1.5) {
+        let a1 = round(rL * P); let a2 = round(uL * P); let b1 = round(rL * P * .5); let b2 = round(uL * P * .5);
+        if (solidAt(c + a1, G, ro, i.c.w) || solidAt(c - a1, G, ro, i.c.w) || solidAt(c + a2, G, ro, i.c.w) || solidAt(c - a2, G, ro, i.c.w)
+         || solidAt(c + b1, G, ro, i.c.w) || solidAt(c - b1, G, ro, i.c.w) || solidAt(c + b2, G, ro, i.c.w) || solidAt(c - b2, G, ro, i.c.w)) { oT = te; }
+      }
+    }
     if (tm.x < tm.y && tm.x < tm.z) { c.x += st.x; te = tm.x; tm.x += td.x; ax = 0; }
     else if (tm.y < tm.z) { c.y += st.y; te = tm.y; tm.y += td.y; ax = 1; }
     else { c.z += st.z; te = tm.z; tm.z += td.z; ax = 2; }
@@ -1144,11 +1158,17 @@ fn near(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
   if (f.w <= 0.) {
     if (oT < 0.) { discard; }
     let wpo = g.cam.xyz + rd * ((t0 + oT) * s);
-    let pulse = 1.5 + 1.1 * sin(g.cam.w * 4. + f32(id % 2048u) * 1.9);
+    let pulse = 2.6 + 1.2 * sin(g.cam.w * 4. + f32(id % 2048u) * 1.9);
     var fl: FO;
-    fl.c = vec4f(select(vec3f(1., .78, .2), vec3f(1., .12, .16), mode == 2u) * pulse, -8.);
-    fl.d = g.fwd.w / max(dot(wpo - g.cam.xyz, g.fwd.xyz), g.fwd.w);
+    fl.c = vec4f(select(vec3f(1., .62, .06), vec3f(1., .07, .1), isIt) * pulse, -8.);
+    fl.d = select(g.fwd.w / max(dot(wpo - g.cam.xyz, g.fwd.xyz), g.fwd.w), 1., xray);
     return fl;
+  }
+  if (xray) { // found by sonar: a flat glowing ghost, in front of everything
+    var fx: FO;
+    fx.c = vec4f(select(vec3f(1., .62, .06), vec3f(1., .07, .1), isIt) * (.55 + .3 * select(0., 1., f.w >= 2.)), -8.);
+    fx.d = 1.;
+    return fx;
   }
   var nl = vec3f(0.); nl[ax] = -st[ax];
   let n = B * nl;
