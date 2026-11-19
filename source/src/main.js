@@ -682,17 +682,17 @@ function packSwarm() {
 
 // ============================================================================ the game: podGAN Photo Lap
 // You are a podGAN: one of the swarm, seen from behind and above, drawn as a wireframe so you can see through
-// yourself. It swims the general way you look; hold right-click to jet (tap for one kick). Swim a lap through the
-// 8 glowing gates, and on the way take 3 photos (left-click). Each podGAN in a photo scores by how rare it is
+// yourself. It rides the same route round the garden every lap while you look around, and on the way you take
+// 3 photos (left-click). Each podGAN in a photo scores by how rare it is
 // (rainbows are everywhere, inkfish are 1 in 128, krakens are worth more), plus a crowd bonus for lots in one
 // shot and a bonus for every matching pair. Your lap score is your three photos.
 // Opened from the podGARDEN server (server/server.mjs), friends swim in the same ocean and the best laps go on a
 // shared board; anywhere else you swim on your own, with your best lap kept in this browser.
 const NET = { ws: null, id: 0, host: true, online: false, players: new Map(), sendT: 0, podT: 0, board: [] };
 const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, jetDown: false };
-const LAP = { on: false, t0: 0, gate: 1, shots: [], left: 3, next: 0, best: 0, flash: 0, pend: null };
+const LAP = { on: false, t0: 0, d: 0, shots: [], left: 3, next: 0, best: 0, flash: 0, pend: null };
 try { LAP.best = +localStorage.podLapBest || 0; } catch {}
-const NGATE = 8, SHOTS = 3, SHOT_R = 40, FRAME = 0.8; // the photo frame is the middle 80% of the view
+const SHOTS = 3, SHOT_R = 40, FRAME = 0.8; // the photo frame is the middle 80% of the view
 const inks = []; // (the voxel pass still reads ink clouds; none in this game)
 const feedEl = $('feed'), nsEl = $('ns'), nmEl = $('nm'), tagEl = $('n'), itEl = $('itb'), lblEl = $('lbl'), inkEl = $('ink'), resEl = $('res');
 const vfEl = $('vf'), phEl = $('ph'), flEl = $('fl');
@@ -724,43 +724,51 @@ function become(i, snap) {
   if (o < 0) { const j = i * 3; F[YAW] = atan2(SW.L[j], -SW.L[j + 2]); F[PIT] = -0.4; }
 }
 
-// ---------------------------------------------------------------- the course: 8 gates round the garden
-// Each gate sits at the home of the wild podGAN nearest a point on a 42 m circle (homes are always open water), and
-// faces along the course. Gate 0 is the start and finish.
-const GATES = [];
+// ---------------------------------------------------------------- the route
+// The same ride every lap: a smooth loop round the garden through 8 waypoints. Each waypoint is the home of the wild
+// podGAN nearest a point on a 42 m circle (homes are always open water); the loop between them is a Catmull-Rom
+// spline, lifted wherever it would pass through rock, sampled every half metre.
+const SPEED = 3.5, ROUTE = []; // [x, y, z] every STEP metres
+const STEP = 0.5;
 function course() {
-  if (GATES.length) return;
-  for (let k = 0; k < NGATE; k++) {
-    const a = k / NGATE * 6.2832, x = cos(a) * 42, z = sin(a) * 42;
+  if (ROUTE.length) return;
+  const W8 = [];
+  for (let k = 0; k < 8; k++) {
+    const a = k / 8 * 6.2832, x = cos(a) * 42, z = sin(a) * 42;
     let bi = 0, bd = 1e9;
     for (let i = 0; i < NPOD; i++) { const d = (SW.home[i * 3] - x) ** 2 + (SW.home[i * 3 + 2] - z) ** 2; if (d < bd) { bd = d; bi = i; } }
-    GATES.push([SW.home[bi * 3], SW.home[bi * 3 + 1], SW.home[bi * 3 + 2]]);
+    W8.push([SW.home[bi * 3], SW.home[bi * 3 + 1], SW.home[bi * 3 + 2]]);
   }
-  for (let k = 0; k < NGATE; k++) { // which way each gate faces: from the gate before to the gate after
-    const a = GATES[(k + NGATE - 1) % NGATE], b = GATES[(k + 1) % NGATE];
-    let dx = b[0] - a[0], dy = (b[1] - a[1]) * 0.3, dz = b[2] - a[2]; const l = hypot(dx, dy, dz) || 1;
-    GATES[k].push(dx / l, dy / l, dz / l);
-  }
-}
-const GATE_R = 4; // ring radius, metres
-// the gates for drawing (through the pearl pipeline): rings of glowing beads, the next gate gold and big
-function packPearls() {
-  let n = 0;
-  if (GATES.length) for (let k = 0; k < NGATE; k++) {
-    const [gx, gy, gz, fx, fy, fz] = GATES[k], nxt = LAP.on && k === LAP.gate, fin = k === 0;
-    // two directions across the gate
-    let ax = -fz, az = fx; const al = hypot(ax, az) || 1; ax /= al; az /= al;
-    const bx = fy * az, by = fz * ax - fx * az, bz = -fy * ax;
-    const nb = nxt ? 20 : 12, rr = nxt ? 0.45 : 0.28;
-    const c = nxt ? [1.8, 1.3, 0.3] : fin ? [0.4, 1.6, 0.6] : [0.35, 0.9, 1.3];
-    for (let b = 0; b < nb && n < 200; b++) {
-      const t = b / nb * 6.2832 + (nxt ? F[TIME] * 0.8 : 0), ca = cos(t) * GATE_R, sa = sin(t) * GATE_R;
-      prBuf.set([gx + ax * ca + bx * sa, gy + by * sa, gz + az * ca + bz * sa, rr, ...c, b * 0.7 + k], n * 8); n++;
+  // dense points along the spline, then resampled evenly by distance
+  const dense = [];
+  for (let k = 0; k < 8; k++) {
+    const p0 = W8[(k + 7) % 8], p1 = W8[k], p2 = W8[(k + 1) % 8], p3 = W8[(k + 2) % 8];
+    for (let t = 0; t < 1; t += 0.01) {
+      const t2 = t * t, t3 = t2 * t, c = (a, b, cc, d) => 0.5 * (2 * b + (cc - a) * t + (2 * a - 5 * b + 4 * cc - d) * t2 + (3 * b - a - 3 * cc + d) * t3);
+      const q = [c(p0[0], p1[0], p2[0], p3[0]), c(p0[1], p1[1], p2[1], p3[1]), c(p0[2], p1[2], p2[2], p3[2])];
+      for (let up = 0; up < 20 && sdAt(q[0], q[1], q[2]) > -0.4; up++) q[1] += 0.75; // over the rock, not through it
+      q[1] = min(q[1], -3);
+      dense.push(q);
     }
   }
-  nPearl = n;
-  if (n) Q.writeBuffer(ibPearl, 0, prBuf, 0, n * 8);
+  dense.push(dense[0]);
+  // smooth out the lifts a little
+  for (let pass = 0; pass < 3; pass++) for (let k = 1; k < dense.length - 1; k++) dense[k][1] = max(dense[k][1], (dense[k - 1][1] + dense[k][1] * 2 + dense[k + 1][1]) / 4);
+  ROUTE.push(dense[0].slice());
+  let carry = 0;
+  for (let k = 1; k < dense.length; k++) {
+    const a = dense[k - 1], b = dense[k], l = hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    let d = STEP - carry;
+    while (d <= l) { const t = d / l; ROUTE.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]); d += STEP; }
+    carry = l - (d - STEP);
+  }
 }
+// the point d metres along the route, and the way it heads
+function routeAt(d) {
+  const n = ROUTE.length, f = d / STEP, k = floor(f) % n, t = f - floor(f), a = ROUTE[k], b = ROUTE[(k + 1) % n];
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, (b[0] - a[0]) / STEP, (b[1] - a[1]) / STEP, (b[2] - a[2]) / STEP];
+}
+function packPearls() { nPearl = 0; }
 
 // ---------------------------------------------------------------- photos
 // How much a podGAN is worth in a photo: by colour scheme (how common it is), krakens +2
@@ -800,7 +808,7 @@ function scoreShot(list) {
 // left-click: snap! (the picture itself is grabbed straight after this frame is drawn)
 function photo() {
   if (!LAP.on) return;
-  if (LAP.left <= 0) { feed('No photos left this lap: swim for the finish!'); return; }
+  if (LAP.left <= 0) { feed('No photos left this lap: enjoy the ride!'); return; }
   const sc = scoreShot(inShot(true));
   LAP.left--; LAP.shots.push(sc); LAP.pend = sc; LAP.flash = 1;
   sfx(3000, 1500, 0.08, 0.3, 'square'); setTimeout(() => sfx(900, 700, 0.12, 0.2, 'triangle'), 60);
@@ -821,25 +829,26 @@ function drawPhotos() {
 }
 
 // ---------------------------------------------------------------- the lap
-// start: your podGAN is put just behind the start gate, facing the first gate
+// start: back to the beginning of the route, looking along it
 function lapStart() {
   course();
-  const [gx, gy, gz, fx, fy, fz] = GATES[0], j = PL.pod * 3;
   if (PL.pod < 0) return;
-  SW.P[j] = gx - fx * 8; SW.P[j + 1] = gy - fy * 8; SW.P[j + 2] = gz - fz * 8; SW.V.fill(0, j, j + 3); SW.E.fill(0, j, j + 3);
-  F[YAW] = atan2(fx, -fz); F[PIT] = -0.15; PL.snap = true;
-  Object.assign(LAP, { on: true, t0: F[TIME], gate: 0, shots: [], left: SHOTS, pend: null, start: true });
+  const [, , , fx, , fz] = routeAt(0);
+  F[YAW] = atan2(fx, -fz); F[PIT] = -0.1; PL.snap = true;
+  Object.assign(LAP, { on: true, t0: F[TIME], d: 0, shots: [], left: SHOTS, pend: null });
+  ride(0);
   resEl.className = ''; drawPhotos();
-  feed('🏁 Swim through the glowing gates · 3 photos this lap: left-click!');
+  feed('🎞 Look around and take 3 photos this lap: left-click!');
 }
-function lapGates() {
+// carries your podGAN along the route
+function ride(dt) {
   if (!LAP.on || PL.pod < 0) return;
-  const j = PL.pod * 3, [gx, gy, gz] = GATES[LAP.gate];
-  if (hypot(SW.P[j] - gx, SW.P[j + 1] - gy, SW.P[j + 2] - gz) > GATE_R + 1.5) return;
-  if (LAP.start) { LAP.start = false; LAP.t0 = F[TIME]; LAP.gate = 1; sfx(660, 990, 0.25, 0.2); feed('Go! 🐙'); return; }
-  if (LAP.gate === 0) { lapEnd(); return; }
-  sfx(880, 1320, 0.2, 0.2); LAP.gate = (LAP.gate + 1) % NGATE;
-  if (LAP.gate === 0) feed('Last stretch: back to the green start gate!');
+  LAP.d += SPEED * dt;
+  const len = ROUTE.length * STEP;
+  if (LAP.d >= len) { lapEnd(); return; }
+  const [x, y, z, fx, fy, fz] = routeAt(LAP.d), j = PL.pod * 3, { P, V, H, E } = SW;
+  P[j] = x; P[j + 1] = y; P[j + 2] = z; V[j] = fx * SPEED; V[j + 1] = fy * SPEED; V[j + 2] = fz * SPEED;
+  H[j] = fx; H[j + 1] = fy * 0.6; H[j + 2] = fz; E.fill(0, j, j + 3);
 }
 function lapEnd() {
   LAP.on = false;
@@ -860,9 +869,8 @@ let itTxt = '', liveT = 0, live = null;
 function drawIt(dt) {
   if ((liveT -= dt) <= 0 && LAP.on) { liveT = 0.25; live = scoreShot(inShot(true)); }
   let t;
-  if (!LAP.on) t = '🏁 Lap done!';
-  else if (LAP.start) t = '🏁 Swim through the green start gate to begin';
-  else t = `🏁 Gate ${LAP.gate === 0 ? 'FINISH' : `${LAP.gate}/${NGATE - 1}`} · ⏱ ${mmss(F[TIME] - LAP.t0)} · 📷 ${LAP.left} left`;
+  if (!LAP.on) t = '🎞 Lap done!';
+  else t = `🎞 Lap ${floor(LAP.d / (ROUTE.length * STEP) * 100)}% · ⏱ ${mmss(F[TIME] - LAP.t0)} · 📷 ${LAP.left} left`;
   if (t !== itTxt) { itTxt = t; itEl.textContent = t; }
   const v = LAP.on && LAP.left > 0 && live ? `📷 ${live.n} in frame · ≈${live.total} pts${live.pairs ? ` · ${live.pairs} pair${live.pairs > 1 ? 's' : ''}` : ''}` : '';
   if (vfEl.dataset.t !== v) { vfEl.dataset.t = v; vfEl.lastChild.textContent = v; }
@@ -949,22 +957,13 @@ function podFix(buf) {
 }
 
 // ---------------------------------------------------------------- your podGAN and the camera
-function jetTap() { if (PL.pt < 0 || PL.pt > 0.25) { PL.pt = 0; PL.kicked = false; } }
 function pilot(dt) {
   const i = PL.pod; if (i < 0) return;
   const { P, V, U, cn } = SW, j = i * 3, s = SW.g[i].size;
   const cp = cos(F[PIT]), fx = cp * sin(F[YAW]), fy = sin(F[PIT]), fz = -cp * cos(F[YAW]);
-  // your podGAN swims the way you look with the swarm's pulses (swim()); right-click jets: a tap draws in for
-  // 0.18 s then kicks once, held is full jets
-  PL.hold = PL.jetDown ? PL.hold + dt : 0;
-  if (PL.pt >= 0) {
-    PL.pt += dt;
-    const kk = { Squidder: 6, Squid: 5, Octopod: 4.5, Kraken: 4 }[SW.g[i].name.split(' ')[1]] || 4.5;
-    if (PL.pt >= 0.18 && !PL.kicked) { PL.kicked = true; V[j] += fx * kk; V[j + 1] += fy * kk; V[j + 2] += fz * kk; }
-    cn[i] = PL.pt < 0.18 ? PL.pt / 0.18 : max(0, 1 - (PL.pt - 0.18) / 0.17);
-    if (PL.pt > 0.35) PL.pt = -1;
-  }
-  if (PL.hold > 0.25) { const a = 18 * dt; V[j] += fx * a; V[j + 1] += fy * a; V[j + 2] += fz * a; cn[i] = 0.5 + 0.5 * sin(F[TIME] * 16); }
+  // your podGAN rides the route (ride()); you just look around
+  ride(dt);
+  cn[i] = 0.5 + 0.5 * sin(F[TIME] * 5);
   const px = P[j], py = P[j + 1], pz = P[j + 2];
   // camera: behind and above, pulled in by rock
   const tx = px + U[j] * s * 8, ty = py + U[j + 1] * s * 8, tz = pz + U[j + 2] * s * 8, kc = PL.snap ? 1 : min(1, dt * 6);
@@ -973,7 +972,6 @@ function pilot(dt) {
   for (let d = 0.4; d < D; d += 0.25) if (sdAt(PL.cx - fx * d, PL.cy - fy * d, PL.cz - fz * d) > -0.25) { D = max(d - 0.25, 0.3); break; }
   F[CX] = PL.cx - fx * D; F[CY] = min(PL.cy - fy * D, -1); F[CZ] = PL.cz - fz * D;
   tagEl.className = ''; $('x').className = '';
-  lapGates();
 }
 
 function game(dt) {
@@ -1000,7 +998,7 @@ function game(dt) {
   }
   if (NET.host && (NET.podT -= dt) <= 0) { NET.podT = 0.5; podSend(); }
 }
-// floating names over the other players' podGANs, and an arrow to the next gate when it's off screen
+// floating names over the other players' podGANs
 const lbls = [];
 function labels() {
   let n = 0;
@@ -1017,27 +1015,6 @@ function labels() {
     n++;
   }
   for (let k = n; k < lbls.length; k++) lbls[k].style.display = 'none';
-  arrow();
-}
-let arw = null;
-function arrow() {
-  if (!arw) { arw = document.createElement('div'); arw.className = 'arw'; arw.innerHTML = '<b>➤</b><span></span>'; lblEl.append(arw); }
-  if (!LAP.on || PL.pod < 0 || !GATES.length) { arw.style.display = 'none'; return; }
-  const g = GATES[LAP.gate], j0 = PL.pod * 3, asp = W / H;
-  const d = hypot(g[0] - SW.P[j0], g[1] - SW.P[j0 + 1], g[2] - SW.P[j0 + 2]);
-  const x = g[0] - F[CX], y = g[1] - F[CY], z0 = g[2] - F[CZ], z = x * F[FX] + y * F[FY] + z0 * F[FZ];
-  let sx = (x * F[RX] + z0 * F[RZ]) / (abs(z) * TANH * asp + 1e-6), sy = (x * F[UX] + y * F[UY] + z0 * F[UZ]) / (abs(z) * TANH + 1e-6);
-  const on = z > 0.5 && abs(sx) < 0.85 && abs(sy) < 0.85;
-  arw.lastChild.textContent = `${LAP.gate === 0 ? '🏁' : `gate ${LAP.gate}`} · ${Math.round(d)} m`;
-  if (on) { // in view: the label sits on the gate
-    arw.firstChild.style.display = 'none'; arw.style.left = `${(sx * 0.5 + 0.5) * 100}%`; arw.style.top = `${(0.5 - sy * 0.5) * 100 - 6}%`;
-  } else {
-    if (z <= 0.5 && abs(sx) < 0.05 && abs(sy) < 0.05) sy = -1;
-    const ang = Math.atan2(-sy, sx);
-    arw.firstChild.style.display = ''; arw.firstChild.style.transform = `rotate(${ang}rad)`;
-    arw.style.left = `${50 + Math.cos(ang) * 42}%`; arw.style.top = `${50 + Math.sin(ang) * 40}%`;
-  }
-  arw.style.display = '';
 }
 
 function frame(now) {
@@ -1109,13 +1086,11 @@ addEventListener('keydown', (e) => {
   if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1);
 });
 addEventListener('keyup', (e) => { if (e.code === 'Tab') $('sb').className = ''; });
-// left: take a photo (or, after a lap, start the next); right: jets (tap for one kick, hold for full jets)
+// left: take a photo (or, after a lap, start the next)
 addEventListener('mousedown', (e) => {
   if (menu || document.pointerLockElement !== canvas) return;
   if (e.button === 0) { if (resEl.className) lapStart(); else photo(); }
-  else if (e.button === 2) { jetTap(); PL.jetDown = true; }
 });
-addEventListener('mouseup', (e) => { if (e.button === 2) PL.jetDown = false; });
 addEventListener('contextmenu', (e) => { if (!menu) e.preventDefault(); });
 addEventListener('keyup', (e) => key(e, 0));
 const release = () => { kf = kb = kl = kr = ku = kd = ks = kj = 0; tId = -1; tN = 0; };
