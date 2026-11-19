@@ -167,6 +167,23 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 #res p.win { color: #ffd75e; font-size: 1.15em; }
 #res p.me span:nth-child(2) { text-decoration: underline; text-underline-offset: .25em; }
 #bs { max-width: 34em; margin: .6em auto 0; font-size: .85em; line-height: 1.4; opacity: .85; }
+#vf { position: absolute; left: 10%; right: 10%; top: 10%; bottom: 10%; display: none; pointer-events: none; }
+#vf.v { display: block; }
+#vf i { position: absolute; width: 2.2em; height: 2.2em; border: 0 solid #fffc; filter: drop-shadow(0 0 3px #000); }
+#vf i:nth-child(1) { left: 0; top: 0; border-width: 3px 0 0 3px; } #vf i:nth-child(2) { right: 0; top: 0; border-width: 3px 3px 0 0; }
+#vf i:nth-child(3) { left: 0; bottom: 0; border-width: 0 0 3px 3px; } #vf i:nth-child(4) { right: 0; bottom: 0; border-width: 0 3px 3px 0; }
+#vf span { position: absolute; left: 0; right: 0; bottom: -1.8em; text-align: center; font: 700 .95em system-ui, sans-serif; color: #fff; text-shadow: 0 0 6px #000, 0 0 3px #000; }
+#ph { position: absolute; right: 1em; bottom: 1em; display: flex; gap: .6em; pointer-events: none; }
+#ph figure, #res figure { margin: 0; padding: .35em .35em .2em; background: #f4f0e6; border-radius: .2em; box-shadow: 0 3px 12px #0009; color: #222; text-align: center; font: 700 .8em system-ui, sans-serif; transform: rotate(-2deg); }
+#ph figure:nth-child(2) { transform: rotate(1.5deg); } #ph figure:nth-child(3) { transform: rotate(-1deg); }
+#ph img, #ph i { display: block; width: 7.5em; height: 4.7em; background: #12303c; object-fit: cover; font-style: normal; line-height: 4.7em; font-size: 1em; }
+#ph figure.e { opacity: .45; }
+#res .pics { display: flex; gap: 1em; justify-content: center; margin: .6em 0; }
+#res figure { width: 13em; font-weight: 400; line-height: 1.35; }
+#res figure img, #res figure i { display: block; width: 100%; aspect-ratio: 8 / 5; background: #12303c; object-fit: cover; margin-bottom: .3em; }
+#res .bd { margin: .6em auto 0; max-width: 24em; font-size: .9em; }
+#res .bd p { grid-template-columns: 2em 3fr 1.4fr 1fr; }
+#fl { position: fixed; inset: 0; background: #fff; pointer-events: none; }
 #res p.nx { display: block; margin-top: .6em; text-align: center; color: #7ff3ff; font-size: .9em; }
 #nm { padding: .8em 1em; border: 0; border-radius: .5em; background: #03131cd9; box-shadow: inset 0 0 0 2px #7ff3ff80; color: #e8fbff;
   font: 700 1em system-ui, sans-serif; letter-spacing: .06em; text-align: center; outline: none; }
@@ -188,19 +205,17 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
       <div id=k>
         <p>
           <i><b>Mouse</b></i>Aim
-          <i><b>Left click</b></i>Hop into a podGAN · hunters: guess who's a player
-          <i><b>Left click</b> open water</i>Jet · hold for full jets
-          <i><b>F</b> / <b>middle click</b></i>Sonar ping (every 6 s)
-          <i><b>Right click</b></i>Squirt ink + jet away fast (once a minute)
+          <i><b>Left click</b></i>Take a photo (3 a lap)
+          <i><b>Right click</b></i>Jet · hold for full jets
         </p>
         <p>
-          <i><b>Tab</b></i>Players
+          <i><b>Tab</b></i>Best laps
           <i><b>Esc</b></i>Menu
           <i><b>M</b></i>Mute
           <i><b>H</b></i>Stats
         </p>
       </div>
-      <p id=bs><b>Body Snatchers:</b> players look exactly like wild podGANs. Hiders 🫥 blend in and swim through pearls ⭐ for points. Hunters 🔴 glow red and must guess who's a player: guess right and they hunt with you, guess wrong and you're stunned. Hiders flicker every 30 s · 4-minute rounds, 3 per match.</p>
+      <p id=bs><b>podGAN Photo Lap:</b> swim a lap through the 8 glowing gates and take 3 photos on the way. Every podGAN in a photo scores by rarity: rainbow 1 · flaming &amp; frozen 3 · phantom 4 · inkfish 30 · krakens +2. Bonuses for a crowd in one shot (6 or more) and for every matching pair (same colour and size).</p>
       <p id=h>Hold to jet · slide to aim</p>
     </div>
   </div>
@@ -209,7 +224,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 <button id=o aria-label=Menu>≡</button>
 <pre id=i></pre>
 <div id=n></div>
-<div id=hud><div id=lbl></div><i id=x></i><p id=itb></p><div id=feed></div><p id=ink></p><p id=warn></p></div>
+<div id=hud><div id=lbl></div><i id=x></i><p id=itb></p><div id=feed></div><p id=ink></p></div><div id=vf><i></i><i></i><i></i><i></i><span></span></div><div id=ph></div><div id=fl style="opacity:0"></div>
 <div id=sb></div>
 <div id=res></div>
 <script>

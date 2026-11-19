@@ -331,7 +331,7 @@ const ibBig = buf(new Uint8Array(Wd.big.buf), BU.VERTEX), ibBigF = buf(new Uint8
 const ibFish = buf(Wd.fish, BU.VERTEX), ibManta = buf(Wd.mantas, BU.VERTEX), ibBubbles = buf(Wd.bubbles, BU.VERTEX), ibSnowB = buf(Wd.snow, BU.VERTEX);
 const ibPods = buf(PODS, BU.VERTEX);
 const ibSwarm = device.createBuffer({ size: NPOD * 48, usage: BU.VERTEX | BU.COPY_DST }), swBuf = new Float32Array(NPOD * 12);
-const ibPearl = device.createBuffer({ size: 32 * 32, usage: BU.VERTEX | BU.COPY_DST }), prBuf = new Float32Array(32 * 8);
+const ibPearl = device.createBuffer({ size: 200 * 32, usage: BU.VERTEX | BU.COPY_DST }), prBuf = new Float32Array(200 * 8);
 let nPearl = 0;
 let nSwarm = 0;
 const ibGl = buf(Wd.glints, BU.VERTEX), nGl = Wd.glints.length / 8;
@@ -659,16 +659,9 @@ function swim(dt) {
 function packSwarm() {
   const { P, U, L, cn, g } = SW, cx = F[CX], cy = F[CY], cz = F[CZ], fx = F[FX], fy = F[FY], fz = F[FZ], rx = F[RX], rz = F[RZ], ux = F[UX], uy = F[UY], uz = F[UZ];
   const far = 85 * det, tx = TANH * W / H; let n = 0;
-  // hunters glow red for everyone. Hiders look like any wild podGAN, except to each other (gold), and to the hunters
-  // only while they flicker (every 30 s) or a hunter's sonar has found them (then through everything)
-  const outl = new Map(), meIt = isIt(NET.id), flick = flickering();
-  for (const [id, p] of NET.players) {
-    if (id === NET.id || SW.own[p.pod] !== id) continue;
-    const sn = F[TIME] - (seen.get(id) ?? -1e9) < SEEN ? 2 : 0;
-    if (isIt(id)) outl.set(p.pod, 2 + sn);
-    else if (!meIt || NET.state !== 'play' || flick) outl.set(p.pod, 3);
-    else if (sn) outl.set(p.pod, 5);
-  }
+  // the other players' podGANs glow gold so you can find your friends
+  const outl = new Map();
+  for (const [id, p] of NET.players) if (id !== NET.id && SW.own[p.pod] === id) outl.set(p.pod, 3);
   for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
     const dx = P[j] - cx, dy = P[j + 1] - cy, dz = P[j + 2] - cz, d = hypot(dx, dy, dz), G = g[i], r = G.size * 26;
     if (d > far + r && !outl.has(i)) continue;
@@ -687,212 +680,231 @@ function packSwarm() {
   if (n) Q.writeBuffer(ibSwarm, 0, swBuf, 0, n * 12);
 }
 
-// ============================================================================ the game: Body Snatchers
+// ============================================================================ the game: podGAN Photo Lap
 // You are a podGAN: one of the swarm, seen from behind and above, drawn as a wireframe so you can see through
-// yourself. It swims the general way you look; left-click open water to jet, right-click to squirt ink and jet
-// away fast (once a minute), F or middle-click for sonar. Left-click a podGAN to jump into it.
-// The rules are in tag.js. Players look just like wild podGANs. Two hunters (glowing red) look for the hiders:
-// hiders swim through pearls for points and may hop into any wild podGAN; a hunter's jump is a guess. A hider
-// guessed right gets a split-second warning (ink to escape), then hunts too; a wrong guess stuns the hunter and
-// makes the podGAN squeal. Hiders flicker every 30 s; a hunter's sonar reveals hiders close by but goes "bwong"
-// for everyone. 4-minute rounds, three to a match.
-// Opened from the podGARDEN server (server/server.mjs) with friends, the server runs the rules. On your own (a
-// file, GitHub Pages, or alone on the server) you play against 7 bots, with the same rules running in the browser.
-const NET = { ws: null, id: 0, host: true, online: false, solo: null, players: new Map(), its: new Set(), at: new Map(), tags: new Map(),
-  state: 'wait', n: 0, rim: 1, t0: 0, rs: 0, len: 240000, next: 0, res: null, sendT: 0, podT: 0, pearls: [], pts: new Map(), tot: new Map() };
-const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9, boost: 0,
-  jetDown: false, entering: false, enterAt: 0, beepT: 0, stun: 0, took: new Map() };
-const INK_GAP = 60, INK_LIFE = 14;
-// sonar: a hunter's ping shows hiders within PING_R metres through everything for SEEN seconds (and everyone hears
-// it); a hider's ping points at every hunter. Every PING_GAP seconds
-const PING_GAP = 6, PING_R = 60, SEEN = 2.5, ESCAPE = 1.5;
-const seen = new Map(); // player id -> when your sonar found them close by
-const heard = new Map(); // player id -> when you last heard them (arrows point at them)
-// hiders flicker into view for the hunters for 1.2 s every 30 s
-const flickering = () => { const el = performance.now() - NET.rs; return NET.state === 'play' && el > 5000 && el % 30000 < 1200; };
-const inks = []; // { x, y, z, t, seed }
+// yourself. It swims the general way you look; hold right-click to jet (tap for one kick). Swim a lap through the
+// 8 glowing gates, and on the way take 3 photos (left-click). Each podGAN in a photo scores by how rare it is
+// (rainbows are everywhere, inkfish are 1 in 128, krakens are worth more), plus a crowd bonus for lots in one
+// shot and a bonus for every matching pair. Your lap score is your three photos.
+// Opened from the podGARDEN server (server/server.mjs), friends swim in the same ocean and the best laps go on a
+// shared board; anywhere else you swim on your own, with your best lap kept in this browser.
+const NET = { ws: null, id: 0, host: true, online: false, players: new Map(), sendT: 0, podT: 0, board: [] };
+const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, jetDown: false };
+const LAP = { on: false, t0: 0, gate: 1, shots: [], left: 3, next: 0, best: 0, flash: 0, pend: null };
+try { LAP.best = +localStorage.podLapBest || 0; } catch {}
+const NGATE = 8, SHOTS = 3, SHOT_R = 40, FRAME = 0.8; // the photo frame is the middle 80% of the view
+const inks = []; // (the voxel pass still reads ink clouds; none in this game)
 const feedEl = $('feed'), nsEl = $('ns'), nmEl = $('nm'), tagEl = $('n'), itEl = $('itb'), lblEl = $('lbl'), inkEl = $('ink'), resEl = $('res');
-try { nmEl.value = localStorage.podName || ''; } catch {}
+const vfEl = $('vf'), phEl = $('ph'), flEl = $('fl');
 const pname = (id) => id === NET.id ? 'you' : NET.players.get(id)?.name || `podGAN ${id + 1}`;
 const podName = (i) => `${SW.g[i].name} · #${String(i).padStart(4, '0')}`;
-const isIt = (id) => NET.its.has(id);
 function feed(msg) {
-  const e = document.createElement('p'); e.textContent = msg; feedEl.prepend(e);
-  while (feedEl.children.length > 5) feedEl.lastChild.remove();
-  setTimeout(() => e.remove(), 6000);
+  const p = document.createElement('p'); p.textContent = msg; feedEl.prepend(p);
+  setTimeout(() => p.remove(), 6000); while (feedEl.children.length > 4) feedEl.lastChild.remove();
 }
-function flash() { body.classList.remove('hurt'); void body.offsetWidth; body.classList.add('hurt'); }
 const esc = (t) => String(t).replace(/[<&]/g, '');
-const allIds = () => [NET.id, ...NET.players.keys()];
-const freeCount = () => allIds().filter((id) => !isIt(id)).length;
-const addPts = (id, n) => NET.pts.set(id, (NET.pts.get(id) || 0) + n);
-const mmss = (ms) => { const t = max(0, Math.ceil(ms / 1000)); return `${floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
-// Tab: who hunts, who hides, points this round and this match
-function drawScores() {
-  const rows = allIds().map((id) => [id, id === NET.id ? nmEl.value || 'you' : pname(id), isIt(id), NET.pts.get(id) || 0, NET.tot.get(id) || 0])
-    .sort((a, b) => b[3] - a[3]);
-  $('sb').innerHTML = `<p><b>Round ${NET.rim} of 3${NET.solo ? ' · vs bots' : ''}</b><b>${freeCount()} hiding</b><b>Points</b><b>Match</b></p>` + rows.map(([id, n, it, pt, tot]) =>
-    `<p${it ? ' class=it' : ''}><span>${esc(n)}${id === NET.id ? ' (you)' : ''}</span><span>${it ? (NET.at.has(id) ? '🔴 hunter (caught)' : '🔴 hunter') : '🫥 hider'}</span><span>${pt}</span><span>${tot + pt}</span></p>`).join('');
+const mmss = (s) => { const t = max(0, floor(s)); return `${floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
+function inkData() { inkArr[0] = 0; return inkArr; }
+const dist = (a, b) => hypot(SW.P[a * 3] - SW.P[b * 3], SW.P[a * 3 + 1] - SW.P[b * 3 + 1], SW.P[a * 3 + 2] - SW.P[b * 3 + 2]);
+// a short tone sliding from f0 to f1 Hz, through the game's sound (audio.js), quiet when muted
+function sfx(f0, f1, dur, vol, type = 'sine') {
+  try {
+    if (muted) return; if (!AC) sound();
+    const t = AC.currentTime, o = AC.createOscillator(), gn = AC.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur * .75);
+    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .015); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
+    o.connect(gn).connect(OUT || AC.destination); o.start(t); o.stop(t + dur + .05);
+  } catch {}
 }
-// the banner at the top: your role, the clock, what's left
-let itTxt = '';
-function drawIt() {
-  const me = isIt(NET.id), free = freeCount(), left = NET.len - (performance.now() - NET.rs);
-  let t;
-  if (NET.state === 'wait') t = 'Waiting for players…';
-  else if (NET.state === 'over') t = 'Round over!';
-  else if (performance.now() < PL.stun) t = `😵 Wrong podGAN! Stunned… · ⏱ ${mmss(left)}`;
-  else if (me) t = `🔴 HUNTER · find the hiders: click a podGAN to guess · ${free} hiding · ⏱ ${mmss(left)}`;
-  else t = `🫥 HIDER · grab pearls ⭐, stay hidden${flickering() ? ' · ⚡ YOU\'RE FLICKERING!' : ''} · ${NET.pts.get(NET.id) || 0} pts · ⏱ ${mmss(left)}`;
-  if (t !== itTxt) { itTxt = t; itEl.textContent = t; itEl.className = me && NET.state === 'play' ? 'me' : ''; }
+// move into podGAN i (snap: the camera jumps there instead of flying over)
+function become(i, snap) {
+  const { own } = SW, o = PL.pod;
+  if (o >= 0 && own[o] === NET.id) own[o] = -1;
+  PL.pod = i; own[i] = NET.id; PL.snap = !!snap; PL.pt = -1;
+  if (o < 0) { const j = i * 3; F[YAW] = atan2(SW.L[j], -SW.L[j + 2]); F[PIT] = -0.4; }
 }
-// the end of a round: points, best first
-function showResults(res, next, hiders, match) {
-  NET.next = performance.now() + next;
-  const best = [...res].sort((a, b) => b[3] - a[3])[0];
-  resEl.innerHTML = `<h2>Round ${NET.rim} of 3: ${hiders ? 'the hiders win! 🫥' : 'the hunters win! 🔴'}</h2>` +
-    `<p class=hd><span></span><span></span><span>Points</span><span>⭐</span><span>Caught</span><span>Match</span></p>` + res.map(([id, n, pt, tot, pe, ca, fr], r) =>
-    `<p class="${r === 0 ? 'win' : ''}${id === NET.id ? ' me' : ''}"><span>${r === 0 ? '🏆' : `${r + 1}.`}</span><span>${esc(id === NET.id ? 'You' : n)}${fr ? ` <small>free ${fr} s</small>` : ''}</span><span>${pt}</span><span>${pe}</span><span>${ca}</span><span>${tot}</span></p>`).join('') +
-    (match ? `<p class=nx>🏆 Match winner: <b>${esc(best[0] === NET.id ? 'You' : best[1])}</b> with ${best[3]} points! A new match starts in <i>${Math.ceil(next / 1000)}</i> s</p>`
-      : `<p class=nx>Next round in <i>${Math.ceil(next / 1000)}</i> s</p>`);
+
+// ---------------------------------------------------------------- the course: 8 gates round the garden
+// Each gate sits at the home of the wild podGAN nearest a point on a 42 m circle (homes are always open water), and
+// faces along the course. Gate 0 is the start and finish.
+const GATES = [];
+function course() {
+  if (GATES.length) return;
+  for (let k = 0; k < NGATE; k++) {
+    const a = k / NGATE * 6.2832, x = cos(a) * 42, z = sin(a) * 42;
+    let bi = 0, bd = 1e9;
+    for (let i = 0; i < NPOD; i++) { const d = (SW.home[i * 3] - x) ** 2 + (SW.home[i * 3 + 2] - z) ** 2; if (d < bd) { bd = d; bi = i; } }
+    GATES.push([SW.home[bi * 3], SW.home[bi * 3 + 1], SW.home[bi * 3 + 2]]);
+  }
+  for (let k = 0; k < NGATE; k++) { // which way each gate faces: from the gate before to the gate after
+    const a = GATES[(k + NGATE - 1) % NGATE], b = GATES[(k + 1) % NGATE];
+    let dx = b[0] - a[0], dy = (b[1] - a[1]) * 0.3, dz = b[2] - a[2]; const l = hypot(dx, dy, dz) || 1;
+    GATES[k].push(dx / l, dy / l, dz / l);
+  }
+}
+const GATE_R = 4; // ring radius, metres
+// the gates for drawing (through the pearl pipeline): rings of glowing beads, the next gate gold and big
+function packPearls() {
+  let n = 0;
+  if (GATES.length) for (let k = 0; k < NGATE; k++) {
+    const [gx, gy, gz, fx, fy, fz] = GATES[k], nxt = LAP.on && k === LAP.gate, fin = k === 0;
+    // two directions across the gate
+    let ax = -fz, az = fx; const al = hypot(ax, az) || 1; ax /= al; az /= al;
+    const bx = fy * az, by = fz * ax - fx * az, bz = -fy * ax;
+    const nb = nxt ? 20 : 12, rr = nxt ? 0.45 : 0.28;
+    const c = nxt ? [1.8, 1.3, 0.3] : fin ? [0.4, 1.6, 0.6] : [0.35, 0.9, 1.3];
+    for (let b = 0; b < nb && n < 200; b++) {
+      const t = b / nb * 6.2832 + (nxt ? F[TIME] * 0.8 : 0), ca = cos(t) * GATE_R, sa = sin(t) * GATE_R;
+      prBuf.set([gx + ax * ca + bx * sa, gy + by * sa, gz + az * ca + bz * sa, rr, ...c, b * 0.7 + k], n * 8); n++;
+    }
+  }
+  nPearl = n;
+  if (n) Q.writeBuffer(ibPearl, 0, prBuf, 0, n * 8);
+}
+
+// ---------------------------------------------------------------- photos
+// How much a podGAN is worth in a photo: by colour scheme (how common it is), krakens +2
+const PTS = { Rainbow: 1, Flaming: 3, Frozen: 3, Phantom: 4, Inkfish: 30 };
+const worth = (name) => (PTS[name.split(' ')[0]] || 1) + (name.endsWith('Kraken') ? 2 : 0);
+// what's in the photo frame right now: podGANs within SHOT_R metres, big enough to make out, not behind rock
+function inShot(full) {
+  const out = [], cx = F[CX], cy = F[CY], cz = F[CZ], asp = W / H, { P, U } = SW;
+  for (let i = 0; i < NPOD; i++) {
+    if (i === PL.pod) continue;
+    const j = i * 3, s = SW.g[i].size;
+    const x = P[j] + U[j] * s * 8 - cx, y = P[j + 1] + U[j + 1] * s * 8 - cy, z0 = P[j + 2] + U[j + 2] * s * 8 - cz;
+    const z = x * F[FX] + y * F[FY] + z0 * F[FZ]; if (z < 0.8 || z > SHOT_R) continue;
+    const sx = (x * F[RX] + z0 * F[RZ]) / (z * TANH * asp), sy = (x * F[UX] + y * F[UY] + z0 * F[UZ]) / (z * TANH);
+    if (abs(sx) > FRAME || abs(sy) > FRAME) continue;
+    if (s * 10 / (z * TANH) < 0.03) continue; // too small to make out
+    if (full) { // rock in the way?
+      const d = hypot(x, y, z0); let hid = false;
+      for (let t = 1.5; t < d - 1; t += 1.5) if (sdAt(cx + x * t / d, cy + y * t / d, cz + z0 * t / d) > 0.05) { hid = true; break; }
+      if (hid) continue;
+    }
+    out.push(i);
+  }
+  return out;
+}
+// a photo's points: each podGAN by rarity, a crowd bonus (n²/4 from 6 up), 5 a matching pair (same scheme and
+// size) and double that with 3 pairs or more
+function scoreShot(list) {
+  const counts = new Map(); let base = 0;
+  for (const i of list) { const n = SW.g[i].name; base += worth(n); counts.set(n, (counts.get(n) || 0) + 1); }
+  const n = list.length, crowd = n >= 6 ? floor(n * n / 4) : 0;
+  let pairs = 0; for (const c of counts.values()) pairs += floor(c / 2);
+  const pair = pairs * 5 * (pairs >= 3 ? 2 : 1);
+  const rare = list.filter((i) => SW.g[i].name.startsWith('Inkfish')).length;
+  return { n, base, crowd, pairs, pair, rare, total: base + crowd + pair, counts };
+}
+// left-click: snap! (the picture itself is grabbed straight after this frame is drawn)
+function photo() {
+  if (!LAP.on) return;
+  if (LAP.left <= 0) { feed('No photos left this lap: swim for the finish!'); return; }
+  const sc = scoreShot(inShot(true));
+  LAP.left--; LAP.shots.push(sc); LAP.pend = sc; LAP.flash = 1;
+  sfx(3000, 1500, 0.08, 0.3, 'square'); setTimeout(() => sfx(900, 700, 0.12, 0.2, 'triangle'), 60);
+  feed(`📸 ${sc.n} podGAN${sc.n === 1 ? '' : 's'} · ${sc.total} pts${sc.rare ? ' · an INKFISH! 🖤' : ''}${sc.pairs ? ` · ${sc.pairs} pair${sc.pairs > 1 ? 's' : ''}` : ''}${sc.crowd ? ' · crowd bonus!' : ''}`);
+}
+// right after the frame with the photo in it is drawn: copy it into a polaroid
+function grabPhoto() {
+  const sc = LAP.pend; if (!sc) return; LAP.pend = null;
+  const c = document.createElement('canvas'); c.width = 240; c.height = 150;
+  const w = canvas.width * FRAME, h = canvas.height * FRAME;
+  try { c.getContext('2d').drawImage(canvas, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h, 0, 0, 240, 150); } catch {}
+  sc.img = c.toDataURL('image/jpeg', 0.8);
+  drawPhotos();
+}
+const shotLines = (s) => [`${s.n} podGAN${s.n === 1 ? '' : 's'}: ${s.base}`, s.crowd ? `crowd bonus: +${s.crowd}` : '', s.pairs ? `${s.pairs} pair${s.pairs > 1 ? 's' : ''}${s.pairs >= 3 ? ' (×2!)' : ''}: +${s.pair}` : '', s.rare ? `inkfish! 🖤 ×${s.rare}` : ''].filter(Boolean);
+function drawPhotos() {
+  phEl.innerHTML = [0, 1, 2].map((k) => { const s = LAP.shots[k]; return s ? `<figure>${s.img ? `<img src="${s.img}">` : '<i></i>'}<figcaption>${s.total} pts</figcaption></figure>` : '<figure class=e><i>📷</i></figure>'; }).join('');
+}
+
+// ---------------------------------------------------------------- the lap
+// start: your podGAN is put just behind the start gate, facing the first gate
+function lapStart() {
+  course();
+  const [gx, gy, gz, fx, fy, fz] = GATES[0], j = PL.pod * 3;
+  if (PL.pod < 0) return;
+  SW.P[j] = gx - fx * 8; SW.P[j + 1] = gy - fy * 8; SW.P[j + 2] = gz - fz * 8; SW.V.fill(0, j, j + 3); SW.E.fill(0, j, j + 3);
+  F[YAW] = atan2(fx, -fz); F[PIT] = -0.15; PL.snap = true;
+  Object.assign(LAP, { on: true, t0: F[TIME], gate: 0, shots: [], left: SHOTS, pend: null, start: true });
+  resEl.className = ''; drawPhotos();
+  feed('🏁 Swim through the glowing gates · 3 photos this lap: left-click!');
+}
+function lapGates() {
+  if (!LAP.on || PL.pod < 0) return;
+  const j = PL.pod * 3, [gx, gy, gz] = GATES[LAP.gate];
+  if (hypot(SW.P[j] - gx, SW.P[j + 1] - gy, SW.P[j + 2] - gz) > GATE_R + 1.5) return;
+  if (LAP.start) { LAP.start = false; LAP.t0 = F[TIME]; LAP.gate = 1; sfx(660, 990, 0.25, 0.2); feed('Go! 🐙'); return; }
+  if (LAP.gate === 0) { lapEnd(); return; }
+  sfx(880, 1320, 0.2, 0.2); LAP.gate = (LAP.gate + 1) % NGATE;
+  if (LAP.gate === 0) feed('Last stretch: back to the green start gate!');
+}
+function lapEnd() {
+  LAP.on = false;
+  const secs = F[TIME] - LAP.t0, pts = LAP.shots.reduce((a, s) => a + s.total, 0), best = pts > LAP.best;
+  if (best) { LAP.best = pts; try { localStorage.podLapBest = pts; } catch {} }
+  sfx(523, 1046, 0.6, 0.25); setTimeout(() => sfx(784, 1568, 0.6, 0.2), 150);
+  netSend({ t: 'lap', pts, secs });
+  LAP.next = performance.now() + 15000;
+  resEl.innerHTML = `<h2>Lap done! ${pts} points${best ? ' · new best! 🏆' : ''}</h2>
+    <div class=pics>${LAP.shots.map((s, k) => `<figure>${s.img ? `<img src="${s.img}">` : '<i></i>'}<figcaption><b>Photo ${k + 1}: ${s.total} pts</b>${shotLines(s).map((l) => `<br>${l}`).join('')}</figcaption></figure>`).join('') || '<p>No photos this lap!</p>'}</div>
+    <p class=nx>Lap time ${mmss(secs)} · your best ${LAP.best} pts</p>${boardHtml()}
+    <p class=nx>Click or wait <i>15</i> s for the next lap</p>`;
   resEl.className = 'v';
 }
-// move into podGAN i (snap: put the camera there at once, otherwise it flies over)
-function become(i, snap) {
-  const { own, V, H } = SW, o = PL.pod;
-  if (o >= 0 && own[o] === NET.id) {
-    own[o] = -1; // the old body goes back to the wild, heading the way it was going
-    const j = o * 3, l = hypot(V[j], V[j + 1], V[j + 2]); if (l > 0.1) { H[j] = V[j] / l; H[j + 1] = V[j + 1] / l * 0.6; H[j + 2] = V[j + 2] / l; }
-  }
-  PL.pod = i; own[i] = NET.id; PL.snap = !!snap; PL.pt = -1;
-  // jumping body to body keeps the view pointing the same way; only a fresh start faces the way the new body faces
-  if (o < 0) { const j = i * 3; F[YAW] = atan2(SW.L[j], -SW.L[j + 2]); F[PIT] = -0.6; }
+const boardHtml = () => NET.board.length ? `<div class=bd><b>Best laps</b>${NET.board.map(([n, p, s], k) => `<p><span>${k + 1}.</span><span>${esc(n)}</span><span>${p} pts</span><span>${mmss(s)}</span></p>`).join('')}</div>` : '';
+// the banner: gate, clock, photos left, and what the frame would score right now
+let itTxt = '', liveT = 0, live = null;
+function drawIt(dt) {
+  if ((liveT -= dt) <= 0 && LAP.on) { liveT = 0.25; live = scoreShot(inShot(true)); }
+  let t;
+  if (!LAP.on) t = '🏁 Lap done!';
+  else if (LAP.start) t = '🏁 Swim through the green start gate to begin';
+  else t = `🏁 Gate ${LAP.gate === 0 ? 'FINISH' : `${LAP.gate}/${NGATE - 1}`} · ⏱ ${mmss(F[TIME] - LAP.t0)} · 📷 ${LAP.left} left`;
+  if (t !== itTxt) { itTxt = t; itEl.textContent = t; }
+  const v = LAP.on && LAP.left > 0 && live ? `📷 ${live.n} in frame · ≈${live.total} pts${live.pairs ? ` · ${live.pairs} pair${live.pairs > 1 ? 's' : ''}` : ''}` : '';
+  if (vfEl.dataset.t !== v) { vfEl.dataset.t = v; vfEl.lastChild.textContent = v; }
+  vfEl.className = LAP.on && LAP.left > 0 ? 'v' : '';
+  if (LAP.flash > 0 || flEl.style.opacity !== '0') { LAP.flash = max(0, LAP.flash - dt * 3); flEl.style.opacity = LAP.flash.toFixed(2); }
 }
-// podGAN vi buds off the side of podGAN i, and the two push apart
-function split(i, vi) {
-  const { P, V, U, H } = SW, j = i * 3, k = vi * 3, s = SW.g[i].size;
-  let sx = U[j + 2], sz = -U[j]; const l = hypot(sx, sz); if (l < 0.1) { sx = 1; sz = 0; } else { sx /= l; sz /= l; }
-  P[k] = P[j] + sx * s * 14; P[k + 1] = P[j + 1]; P[k + 2] = P[j + 2] + sz * s * 14;
-  V[k] = V[j] + sx * 4; V[k + 1] = V[j + 1] + 0.5; V[k + 2] = V[j + 2] + sz * 4;
-  V[j] -= sx * 3; V[j + 2] -= sz * 3;
-  U.set([U[j], U[j + 1], U[j + 2]], k); H.set([sx, 0, sz], k); SW.E.fill(0, k, k + 3);
+// Tab: the board
+function drawScores() {
+  $('sb').innerHTML = `<p><b>Best laps${NET.online ? '' : ' (this browser)'}</b><b></b><b>Points</b><b>Time</b></p>` +
+    (NET.online ? NET.board : LAP.best ? [['you', LAP.best, 0]] : []).map(([n, p, s], k) => `<p><span>${k + 1}. ${esc(n)}</span><span></span><span>${p}</span><span>${s ? mmss(s) : ''}</span></p>`).join('');
 }
-// --- what happened, from the server or from the rules running here for a solo game
-const addP = (p) => { NET.players.set(p.id, { id: p.id, name: p.name, pod: p.pod, tp: null }); SW.own[p.pod] = p.id; if (p.it) NET.its.add(p.id); };
+
+// --- what happened, from the server
+const addP = (p) => { NET.players.set(p.id, { id: p.id, name: p.name, pod: p.pod, tp: null }); SW.own[p.pod] = p.id; };
 function netMsg(m) {
-  const P = NET.players, own = SW.own, now = (performance.now() - NET.t0) / 1000;
+  const P = NET.players, own = SW.own;
   switch (m.t) {
-    case 'full': NET.full = true; status('The server is full (8 podGANs). Playing against bots.'); break;
+    case 'full': NET.full = true; status('The server is full (8 podGANs). Swimming on your own.'); break;
     case 'hi': {
-      const alone = m.players.length === 1;
-      NET.online = true; NET.host = m.host === m.id;
-      if (!(alone && NET.solo && NET.id === m.id)) {
-        soloStop(); NET.id = m.id; own.fill(-1); P.clear(); NET.its.clear(); NET.at.clear(); NET.tags.clear();
-        for (const p of m.players) if (p.id !== m.id) addP(p);
-        const mine = m.players.find((p) => p.id === m.id); if (mine.it) NET.its.add(m.id);
-        PL.pod = -1; become(mine.pod, true);
-        NET.state = m.state; NET.n = m.n; NET.rim = m.rim || 1; NET.t0 = performance.now(); NET.rs = NET.t0 - (m.el || 0); NET.len = m.len || NET.len;
-        NET.pearls = m.pearls || []; NET.pts.clear(); NET.tot.clear(); for (const p of m.players) NET.tot.set(p.id, p.total || 0);
-        if (m.state === 'over' && m.res) showResults(m.res, 8000, true, false);
-      }
-      netName(); countMsg(); drawIt();
+      NET.online = true; NET.host = m.host === m.id; NET.id = m.id; NET.board = m.board || [];
+      for (const p of P.values()) if (own[p.pod] === p.id) own[p.pod] = -1;
+      P.clear();
+      for (const p of m.players) if (p.id !== m.id) addP(p);
+      const was = PL.pod; PL.pod = -1; become(m.players.find((p) => p.id === m.id).pod, true);
+      if (was >= 0 && own[was] < 0) own[was] = -1;
+      lapStart(); netName(); countMsg();
       break;
     }
-    case 'join': addP(m.p); feed(`${m.p.name} swam in${m.p.it ? ' and joins the hunt' : ''}`); countMsg(); drawIt(); break;
-    case 'bye': feed(`${pname(m.id)} left`); if (own[m.i] === m.id) own[m.i] = -1; P.delete(m.id); NET.its.delete(m.id); countMsg(); drawIt(); break;
+    case 'join': addP(m.p); feed(`${m.p.name} swam in`); countMsg(); break;
+    case 'bye': feed(`${pname(m.id)} left`); if (own[m.i] === m.id) own[m.i] = -1; P.delete(m.id); countMsg(); break;
     case 'name': { const p = P.get(m.id); if (p) p.name = m.name; break; }
     case 'host': NET.host = m.id === NET.id; countMsg(); break;
-    case 'wait': NET.state = 'wait'; if (NET.online && !P.size) soloStart(); drawIt(); break;
-    case 'round': {
-      seen.clear(); heard.clear();
-      if (!m.local && NET.solo) soloStop();
-      NET.state = 'play'; NET.n = m.n; NET.rim = m.rim; NET.t0 = NET.rs = performance.now(); NET.len = m.len; resEl.className = '';
-      NET.its = new Set(m.its); NET.at.clear(); NET.tags.clear(); NET.pts.clear(); NET.pearls = m.pearls; PL.took.clear(); PL.stun = 0;
-      if (m.rim === 1) NET.tot.clear();
-      for (const p of P.values()) if (own[p.pod] === p.id) own[p.pod] = -1;
-      for (const [id, pod] of m.pods) {
-        if (id === NET.id) become(pod, true);
-        else { const p = P.get(id); if (p) { p.pod = pod; p.tp = null; own[pod] = id; } }
-      }
-      if (isIt(NET.id)) { feed(`Round ${m.rim} of 3: you're a HUNTER 🔴 Hiders look like wild podGANs: watch how they swim`); flash(); }
-      else feed(`Round ${m.rim} of 3: you're a HIDER 🫥 Blend in, grab pearls ⭐ The hunters glow red`);
-      drawIt();
-      break;
-    }
-    case 'miss': { // a hunter guessed wrong: stunned, and the podGAN squeals
-      const ps = m.id === NET.id ? PL.pod : P.get(m.id)?.pod ?? -1;
-      if (m.id === NET.id) { PL.stun = performance.now() + m.until; flash(); feed('Wrong podGAN! 😵 Just a wild one. Stunned for 3 s'); }
-      else feed(`${pname(m.id)} grabbed the wrong podGAN! 😵`);
-      const d = PL.pod >= 0 ? dist(PL.pod, m.i) : 99;
-      if (d < 70) sfx(2600, 900, 0.4, 0.08 + 0.25 * (1 - d / 70), 'triangle');
-      if (m.local && ps >= 0) { const b = NET.solo?.bots.get(m.id); if (b) b.stun = F[TIME] + m.until / 1000; }
-      break;
-    }
-    case 'pearl': {
-      NET.pearls[m.k] = m.pod; addPts(m.by, 10);
-      if (m.by === NET.id) { feed('⭐ Pearl! +10'); sfx(1200, 2400, 0.25, 0.2); }
-      break;
-    }
-    case 'bonus': addPts(m.id, m.pts); if (m.id === NET.id) { feed(`🖤 An inkfish! Ink refilled · +${m.pts}`); PL.inkT = -1e9; sfx(600, 1800, 0.5, 0.25); } break;
-    case 'bwong': // a hunter's sonar: everyone hears it, and the hiders see which way it came from
-      if (m.id === NET.id) break;
-      heard.set(m.id, F[TIME]);
-      { const d = PL.pod >= 0 ? dist(PL.pod, m.i) : 99; sfx(220, 110, 1.4, 0.15 + 0.25 * max(0, 1 - d / 120), 'sine'); }
-      if (!isIt(NET.id)) feed(`📡 BWONG! ${pname(m.id)} pinged (follow the arrow)`);
-      break;
-    case 'own': // someone moved into a wild podGAN
-      if (m.id === NET.id) { become(m.i, false); feed(`You are now a ${SW.g[m.i].name}`); }
-      else { const p = P.get(m.id); if (p) { if (own[m.from] === m.id) own[m.from] = -1; p.pod = m.i; p.tp = null; own[m.i] = m.id; } }
-      break;
-    case 'enter': { // m.by is getting into m.v's podGAN: m.v can ink away in time
-      if (m.v === NET.id) {
-        const inkOk = INK_GAP - (F[TIME] - PL.inkT) <= 0;
-        warnOn(inkOk ? `⚠️ ${esc(pname(m.by))} is getting in!<br><b>RIGHT-CLICK NOW!</b>` : `⚠️ ${esc(pname(m.by))} is getting in!<br><small>no ink left…</small>`);
-        sfx(1800, 600, 0.25, 0.35, 'sawtooth'); flash();
-      } else if (m.by === NET.id) feed(`Getting into ${pname(m.v)}…`);
-      const b = NET.solo?.bots.get(m.v);
-      if (m.local && b && b.ink <= 0 && Math.random() < 0.45) setTimeout(() => { // bots sometimes ink away in time
-        const pv = P.get(m.v), hp = m.by === NET.id ? PL.pod : P.get(m.by)?.pod ?? -1;
-        if (!pv || !NET.solo || hp < 0) return;
-        const j = pv.pod * 3, k = hp * 3;
-        botInk(m.v, b, pv.pod, SW.P[j] - SW.P[k] + Math.random() - 0.5, (SW.P[j + 1] - SW.P[k + 1]) * 0.3, SW.P[j + 2] - SW.P[k + 2] + Math.random() - 0.5);
-      }, 60 + Math.random() * 100);
-      break;
-    }
-    case 'dodge':
-      if (m.v === NET.id) { warnOff(); feed('💨 You inked away just in time!'); }
-      else if (m.by === NET.id) feed(`${pname(m.v)} got away!`);
-      else feed(`${pname(m.v)} escaped ${pname(m.by)}`);
-      break;
-    case 'catch': { // m.by jumped into m.v's podGAN m.i; it split and m.v swims off in m.vi, a hunter now too
-      if (m.v === NET.id) warnOff();
-      NET.its.add(m.v); NET.at.set(m.v, now); NET.tags.set(m.by, (NET.tags.get(m.by) || 0) + 1); addPts(m.by, 25);
-      const pb = P.get(m.by), pv = P.get(m.v);
-      if (own[m.from] === m.by) own[m.from] = -1;
-      own[m.i] = -1; split(m.i, m.vi);
-      if (m.by === NET.id) become(m.i, false); else if (pb) { pb.pod = m.i; pb.tp = null; own[m.i] = m.by; }
-      if (m.v === NET.id) become(m.vi, false); else if (pv) { pv.pod = m.vi; pv.tp = null; own[m.vi] = m.v; }
-      const left = m.left ? ` · ${m.left} still hiding` : '';
-      if (m.by === NET.id) feed(`You caught ${pname(m.v)}! +25 · They hunt with you now${left}`);
-      else if (m.v === NET.id) { feed(`${pname(m.by)} found you! Now you hunt 🔴${left}`); flash(); }
-      else feed(`${pname(m.by)} caught ${pname(m.v)}${left}`);
-      drawIt();
-      break;
-    }
-    case 'it': NET.its.add(m.id); if (m.id === NET.id) { feed("You're a hunter now! 🔴"); flash(); } drawIt(); break;
-    case 'over':
-      NET.state = 'over'; NET.res = m.res; for (const r of m.res) NET.tot.set(r[0], r[3]); NET.pts.clear();
-      showResults(m.res, m.next, m.hiders, m.match); feed(m.hiders ? 'Time! The hiders win 🫥' : 'Everyone found! The hunters win 🔴'); drawIt(); break;
     case 's': { const p = P.get(m.id); if (!p || m.i !== p.pod) break; p.tp = m; break; }
-    case 'ink': addInk(m.p[0], m.p[1], m.p[2]); break;
-    case 'no': feed(m.why); break;
+    case 'lap': feed(`🏁 ${pname(m.id)} finished a lap: ${m.pts} pts`); break;
+    case 'board': NET.board = m.board; break;
   }
 }
 // --- networking
 const status = (m) => { nsEl.textContent = m; };
 function netStart() {
   const srv = new URLSearchParams(location.search).get('server');
-  if (!srv && (!/^https?:$/.test(location.protocol) || /github\.io$/.test(location.hostname))) { status('Playing against 7 bots. To play tag with friends, open the game from your podGARDEN server.'); return; }
+  if (!srv && (!/^https?:$/.test(location.protocol) || /github\.io$/.test(location.hostname))) { status('Swimming on your own. To swim with friends, open the game from your podGARDEN server.'); return; }
   const u = srv || location.host;
   status('Connecting to the server…');
   const ws = NET.ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + u + '/ws');
@@ -900,34 +912,14 @@ function netStart() {
   ws.onmessage = (e) => { if (typeof e.data !== 'string') podFix(e.data); else netMsg(JSON.parse(e.data)); };
   ws.onclose = () => {
     const was = NET.online; NET.online = false; NET.host = true;
-    if (was) { for (const p of NET.players.values()) if (SW.own[p.pod] === p.id) SW.own[p.pod] = -1; NET.players.clear(); NET.its.clear(); soloStart(); }
+    if (was) { for (const p of NET.players.values()) if (SW.own[p.pod] === p.id) SW.own[p.pod] = -1; NET.players.clear(); }
     if (NET.full) return;
-    status(was ? 'Lost the server. Playing against bots, reconnecting…' : 'No server here. Playing against bots, retrying…'); setTimeout(netStart, 3000);
+    status(was ? 'Lost the server. Swimming on your own, reconnecting…' : 'No server here. Swimming on your own, retrying…'); setTimeout(netStart, 3000);
   };
 }
 const netSend = (m) => { if (NET.online && NET.ws.readyState === 1) NET.ws.send(typeof m === 'string' || m instanceof ArrayBuffer ? m : JSON.stringify(m)); };
 function netName() { const n = nmEl.value.trim(); try { localStorage.podName = n; } catch {} if (n) netSend({ t: 'name', name: n }); }
-const countMsg = () => status(NET.solo ? 'Online, waiting for friends · playing against 7 bots meanwhile' : `Online · ${NET.players.size + 1} of 8 podGANs${NET.host ? ' · your browser hosts the swarm' : ''}`);
-// --- solo: the rules run here, against 7 bots
-const BOTS = ['Squidge', 'Inky', 'Wobbles', 'Cap. Tentacle', 'Blorp', 'Prof. Suckers', 'Noodle'];
-function soloStart() {
-  if (NET.solo) return;
-  const game = TagGame({ npod: NPOD, now: () => performance.now(), emit: (m) => { m.local = true; netMsg(m); } });
-  NET.solo = { game, bots: new Map() };
-  game.add(NET.id, nmEl.value.trim() || 'you');
-  BOTS.forEach((name, k) => {
-    const id = 20 + k, p = game.add(id, name);
-    NET.players.set(id, { id, name, pod: p.pod, tp: null, bot: true });
-    NET.solo.bots.set(id, { lock: 0, need: 1, hop: 2 + Math.random() * 4, ink: 10 + Math.random() * 40, burst: 0, on: false, pt: 0, pk: null, ping: 4 + Math.random() * 8, guess: 15 + Math.random() * 15, stun: 0, mark: null, mt: 0 });
-  });
-  game.newRound();
-  if (NET.online) countMsg();
-}
-function soloStop() {
-  if (!NET.solo) return;
-  for (const id of NET.solo.bots.keys()) { const p = NET.players.get(id); if (p && SW.own[p.pod] === id) SW.own[p.pod] = -1; NET.players.delete(id); }
-  NET.solo = null; NET.its.clear(); resEl.className = '';
-}
+const countMsg = () => status(`Online · ${NET.players.size + 1} of 8 podGANs${NET.host ? ' · your browser hosts the swarm' : ''}`);
 // wild swarm corrections: the host sends every podGAN's position, velocity, heading, pulse phase and count twice a second
 const POD_REC = 10; // int16s per podGAN
 function podSend() {
@@ -955,301 +947,51 @@ function podFix(buf) {
     const w = a[o + 9] & 65535; ph[i] = (w & 255) / 255; pc[i] = (pc[i] & ~255) | (w >> 8);
   }
 }
-// --- controls
-// the middle of the view: the podGAN whose body the aim passes closest to, nearest first
-function aimAt() {
-  const { P, U, g } = SW, cx = F[CX], cy = F[CY], cz = F[CZ], fx = F[FX], fy = F[FY], fz = F[FZ];
-  let best = -1, bt = 45;
-  for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
-    if (i === PL.pod) continue;
-    const s = g[i].size, dx = P[j] + U[j] * s * 8 - cx, dy = P[j + 1] + U[j + 1] * s * 8 - cy, dz = P[j + 2] + U[j + 2] * s * 8 - cz;
-    const t = dx * fx + dy * fy + dz * fz;
-    if (t < 0.5 || t > bt) continue;
-    const px = dx - fx * t, py = dy - fy * t, pz = dz - fz * t, r = s * 9 + t * 0.015;
-    if (px * px + py * py + pz * pz < r * r) { best = i; bt = t; }
-  }
-  return best;
-}
-function jump() {
-  const i = PL.tgt;
-  if (i < 0 || F[TIME] - PL.jumpT < 0.4) return;
-  if (performance.now() < PL.stun) { feed("You're stunned!"); return; }
-  PL.jumpT = F[TIME];
-  const o = SW.own[i];
-  // a hider can't hop into another player; a hunter's jump into anything but a hunter is a guess (no hints here)
-  if (o >= 0 && o !== NET.id && (!isIt(NET.id) || isIt(o))) { feed(isIt(o) ? `${pname(o)} is a hunter` : 'Someone is already in there'); return; }
-  if (NET.solo) { const why = NET.solo.game.jump(NET.id, i); if (why) feed(why); }
-  else netSend({ t: 'jump', i });
-}
-// sonar ping: a ring sweeps out from the middle of the screen and finds every other player close by
-function ping() {
-  if (PL.pod < 0) return;
-  const wait = PING_GAP - (F[TIME] - PL.pingT);
-  if (wait > 0) { feed(`Sonar recharging · ${Math.ceil(wait)} s`); return; }
-  PL.pingT = F[TIME];
-  if (NET.solo) NET.solo.game.ping(NET.id); else netSend({ t: 'ping' });
-  let n = 0;
-  if (isIt(NET.id) && NET.state === 'play') { // hunters: hiders close by show through everything (and everyone heard you)
-    for (const [id, p] of NET.players) if (SW.own[p.pod] === id && !isIt(id) && dist(PL.pod, p.pod) < PING_R) { seen.set(id, F[TIME]); n++; }
-    feed(`📡 BWONG! ${n ? `${n} hider${n > 1 ? 's' : ''} close by!` : 'No hiders within 60 m'} (everyone heard that)`);
-  } else { // hiders: arrows to every hunter
-    for (const [id, p] of NET.players) if (SW.own[p.pod] === id && isIt(id)) { heard.set(id, F[TIME]); n++; }
-    feed(`📡 Sonar: ${n} hunter${n === 1 ? '' : 's'} (follow the red arrows)`);
-  }
-  const r = document.createElement('i'); r.className = 'ping'; document.body.append(r); setTimeout(() => r.remove(), 1300);
-  sfx(1500, 700, 1.2, .25);
-}
-// a short tone sliding from f0 to f1 Hz, through the game's sound (audio.js), quiet when muted
-function sfx(f0, f1, dur, vol, type = 'sine') {
-  try {
-    if (muted) return; if (!AC) sound();
-    const t = AC.currentTime, o = AC.createOscillator(), gn = AC.createGain();
-    o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur * .75);
-    gn.gain.setValueAtTime(.0001, t); gn.gain.exponentialRampToValueAtTime(vol, t + .015); gn.gain.exponentialRampToValueAtTime(.0001, t + dur);
-    o.connect(gn).connect(OUT || AC.destination); o.start(t); o.stop(t + dur + .05);
-  } catch {}
-}
-// warnings: a hunter closing in beeps faster and faster; one getting into your podGAN sets off the alarm, and you
-// have a split second to right-click and ink away
-const warnEl = $('warn'), hudEl = $('hud');
-function warnOn(html) { PL.entering = true; PL.enterAt = F[TIME]; warnEl.innerHTML = html; warnEl.className = 'on'; }
-function warnOff() { PL.entering = false; warnEl.className = ''; }
-function hunterBeep(dt) {
-  if (PL.entering && F[TIME] - PL.enterAt > 0.8) warnOff();
-  if (NET.state !== 'play' || PL.pod < 0 || isIt(NET.id)) return;
-  let d = 1e9;
-  for (const [id, p] of NET.players) if (id !== NET.id && isIt(id) && SW.own[p.pod] === id) d = min(d, dist(PL.pod, p.pod));
-  if (d > 40) { PL.beepT = 0; return; }
-  if ((PL.beepT -= dt) > 0) return;
-  PL.beepT = 0.12 + d / 40 * 1.1;
-  sfx(d < 15 ? 1320 : 990, d < 15 ? 1320 : 990, 0.09, 0.12 + (1 - d / 40) * 0.2, 'square');
-  hudEl.classList.remove('near'); void hudEl.offsetWidth; hudEl.classList.add('near');
-}
-function addInk(x, y, z) { inks.push({ x, y, z, t: 0, seed: Math.random() * 100 }); if (inks.length > NINK) inks.shift(); }
-// ink squirts out behind a podGAN (dx, dy, dz: the way it faces)
-function inkAt(i, dx, dy, dz) {
-  const j = i * 3, s = SW.g[i].size;
-  return [SW.P[j] - dx * 3, SW.P[j + 1] + s * 8 - dy * 3, SW.P[j + 2] - dz * 3];
-}
-function squirt() {
-  if (PL.pod < 0) return;
-  const dodged = PL.entering;
-  const wait = INK_GAP - (F[TIME] - PL.inkT);
-  if (wait > 0) { feed(`Your ink refills in ${Math.ceil(wait)} s`); return; }
-  if (NET.solo && !NET.solo.game.ink(NET.id)) return;
-  PL.inkT = F[TIME];
-  const [x, y, z] = inkAt(PL.pod, F[FX], F[FY], F[FZ]);
-  addInk(x, y, z);
-  PL.boost = ESCAPE; warnOff();
-  if (!dodged) feed('🦑 Ink! Jets on full: swim for it!');
-  if (!NET.solo) netSend({ t: 'ink', p: [+x.toFixed(2), +y.toFixed(2), +z.toFixed(2)] });
-}
-// ink clouds for the voxel pass: centre + half-size (grows to 10 m in 2.5 s), then thickness (fades over the last 4 s)
-function inkData() {
-  let n = 0;
-  for (const c of inks) {
-    const h = 20 * min(c.t / 2.5, 1), th = min(1, (INK_LIFE - c.t) / 4);
-    if (th <= 0) continue;
-    inkArr.set([c.x, c.y, c.z, max(h, 0.6), th, c.seed, 0, 0], 4 + n * 8); n++;
-  }
-  inkArr[0] = n;
-  return inkArr;
-}
-// ink escape: jets flat out along (dx, dy, dz), heading that way too so the swarm drift doesn't fight it
+
+// ---------------------------------------------------------------- your podGAN and the camera
 function jetTap() { if (PL.pt < 0 || PL.pt > 0.25) { PL.pt = 0; PL.kicked = false; } }
-function jetOut(i, dx, dy, dz, dt, left) {
-  const { V, H, cn } = SW, j = i * 3, l = hypot(dx, dy, dz) || 1, a = 48 * dt / l;
-  V[j] += dx * a; V[j + 1] += dy * a; V[j + 2] += dz * a;
-  H[j] = dx / l; H[j + 1] = dy / l * 0.6; H[j + 2] = dz / l;
-  cn[i] = 0.5 + 0.5 * sin(F[TIME] * 22 + i);
-  if (left <= 0) SW.ph[i] = 0.7; // and back to drifting, gliding out of the last jet
-}
-// places the camera behind and above your podGAN
-const vTmp = [0, 0, 0];
 function pilot(dt) {
-  for (let k = inks.length - 1; k >= 0; k--) if ((inks[k].t += dt) > INK_LIFE) inks.splice(k, 1);
-  const iw = INK_GAP - (F[TIME] - PL.inkT);
-  const pw = PING_GAP - (F[TIME] - PL.pingT);
-  inkEl.innerHTML = (iw > 0 ? `🦑 Ink refills in ${Math.ceil(iw)} s` : '<b>🦑 Ink ready · right-click</b>') + '<br>' +
-    (pw > 0 ? `📡 Sonar recharging · ${Math.ceil(pw)} s` : '<b>📡 Sonar ready · F or middle-click</b>');
   const i = PL.pod; if (i < 0) return;
   const { P, V, U, cn } = SW, j = i * 3, s = SW.g[i].size;
   const cp = cos(F[PIT]), fx = cp * sin(F[YAW]), fy = sin(F[PIT]), fz = -cp * cos(F[YAW]);
-  let vx = V[j], vy = V[j + 1], vz = V[j + 2];
-  // your podGAN drifts with the swarm like any other (swim() moves it). Squirting ink fires its jets flat out for
-  // a moment: a fast escape the way you're looking
-  const stunned = performance.now() < PL.stun;
-  if (stunned) { PL.boost = 0; PL.pt = -1; cn[i] = 0.5 + 0.5 * sin(F[TIME] * 30); } // dizzy: no jets
-  else if (PL.boost > 0) jetOut(i, fx, fy, fz, dt, (PL.boost -= dt));
-  else {
-    // left-click jets: a tap draws in for 0.18 s then kicks once; held, full jets pulsing the way you look
-    PL.hold = PL.jetDown ? PL.hold + dt : 0;
-    if (PL.pt >= 0) {
-      PL.pt += dt;
-      // squidders kick harder, krakens softer
-      const kk = { Squidder: 6, Squid: 4.8, Octopod: 4.2, Kraken: 3.6 }[SW.g[i].name.split(' ')[1]] || 4.5;
-      if (PL.pt >= 0.18 && !PL.kicked) { PL.kicked = true; V[j] += fx * kk; V[j + 1] += fy * kk; V[j + 2] += fz * kk; }
-      cn[i] = PL.pt < 0.18 ? PL.pt / 0.18 : max(0, 1 - (PL.pt - 0.18) / 0.17);
-      if (PL.pt > 0.35) PL.pt = -1;
-    }
-    if (PL.hold > 0.25) { const a = 11 * dt; V[j] += fx * a; V[j + 1] += fy * a; V[j + 2] += fz * a; cn[i] = 0.5 + 0.5 * sin(F[TIME] * 16); }
+  // your podGAN swims the way you look with the swarm's pulses (swim()); right-click jets: a tap draws in for
+  // 0.18 s then kicks once, held is full jets
+  PL.hold = PL.jetDown ? PL.hold + dt : 0;
+  if (PL.pt >= 0) {
+    PL.pt += dt;
+    const kk = { Squidder: 6, Squid: 5, Octopod: 4.5, Kraken: 4 }[SW.g[i].name.split(' ')[1]] || 4.5;
+    if (PL.pt >= 0.18 && !PL.kicked) { PL.kicked = true; V[j] += fx * kk; V[j + 1] += fy * kk; V[j + 2] += fz * kk; }
+    cn[i] = PL.pt < 0.18 ? PL.pt / 0.18 : max(0, 1 - (PL.pt - 0.18) / 0.17);
+    if (PL.pt > 0.35) PL.pt = -1;
   }
+  if (PL.hold > 0.25) { const a = 18 * dt; V[j] += fx * a; V[j + 1] += fy * a; V[j + 2] += fz * a; cn[i] = 0.5 + 0.5 * sin(F[TIME] * 16); }
   const px = P[j], py = P[j + 1], pz = P[j + 2];
-  // camera: behind and above (the aim starts 35 degrees down), flying over after a jump, pulled in by rock
+  // camera: behind and above, pulled in by rock
   const tx = px + U[j] * s * 8, ty = py + U[j + 1] * s * 8, tz = pz + U[j + 2] * s * 8, kc = PL.snap ? 1 : min(1, dt * 6);
   PL.cx += (tx - PL.cx) * kc; PL.cy += (ty - PL.cy) * kc; PL.cz += (tz - PL.cz) * kc; PL.snap = false;
   let D = 1.2 + s * 28;
   for (let d = 0.4; d < D; d += 0.25) if (sdAt(PL.cx - fx * d, PL.cy - fy * d, PL.cz - fz * d) > -0.25) { D = max(d - 0.25, 0.3); break; }
   F[CX] = PL.cx - fx * D; F[CY] = min(PL.cy - fy * D, -1); F[CZ] = PL.cz - fz * D;
-  PL.tgt = aimAt();
-  // what's in the middle of the view
-  if (PL.tgt >= 0) {
-    // only hunters (and, for a hider, fellow hiders) are told apart: anything else reads like a wild podGAN
-    const o = SW.own[PL.tgt], pl = o >= 0 && o !== NET.id ? NET.players.get(o) : null, meIt = isIt(NET.id) && NET.state === 'play';
-    const shown = pl && (isIt(o) || !meIt);
-    tagEl.textContent = shown ? `${pl.name} · ${isIt(o) ? 'hunter 🔴' : 'hider (on your side)'}` : `${podName(PL.tgt)} · ${meIt ? 'click to guess!' : 'click to hop in'}`;
-    tagEl.className = 'v' + (shown ? ' pl' : '');
-  } else tagEl.className = '';
-  $('x').className = PL.tgt >= 0 ? 'on' : '';
-  // pearls: a hider swimming through one takes it (krakens reach further)
-  if (NET.state === 'play' && !isIt(NET.id)) {
-    const k = takePearl(i);
-    if (k >= 0) { PL.took.set(k, F[TIME]); if (NET.solo) NET.solo.game.pearl(NET.id, k); else netSend({ t: 'pearl', k }); }
-  }
+  tagEl.className = ''; $('x').className = '';
+  lapGates();
 }
-// where pearl k is: just above the home of the podGAN it sits at
-const pearlAt = (k) => { const j = NET.pearls[k] * 3; return [SW.home[j], SW.home[j + 1] + 1, SW.home[j + 2]]; };
-// the pearl podGAN i is touching (not one it has just taken and is waiting to hear about), or -1
-function takePearl(i, mine = true) {
-  const j = i * 3, s = SW.g[i].size, r = SW.g[i].name.endsWith('Kraken') ? 4.5 : 2.6;
-  const x = SW.P[j] + SW.U[j] * s * 8, y = SW.P[j + 1] + SW.U[j + 1] * s * 8, z = SW.P[j + 2] + SW.U[j + 2] * s * 8;
-  for (let k = 0; k < NET.pearls.length; k++) {
-    if (mine && F[TIME] - (PL.took.get(k) ?? -9) < 1) continue;
-    const [px, py, pz] = pearlAt(k);
-    if ((px - x) ** 2 + (py - y) ** 2 + (pz - z) ** 2 < r * r) return k;
-  }
-  return -1;
-}
-// the pearls for drawing: pearly white with a rainbow sheen
-function packPearls() {
-  let n = 0;
-  if (NET.state === 'play') for (let k = 0; k < NET.pearls.length && n < 32; k++) {
-    const [x, y, z] = pearlAt(k), h = (k * 0.137 + F[TIME] * 0.05) % 1;
-    prBuf.set([x, y, z, 0.35, 1.1 + 0.4 * cos(h * 6.283), 1.1 + 0.4 * cos((h - 0.33) * 6.283), 1.1 + 0.4 * cos((h - 0.67) * 6.283), k * 1.7], n * 8); n++;
-  }
-  nPearl = n;
-  if (n) Q.writeBuffer(ibPearl, 0, prBuf, 0, n * 8);
-}
-// --- the bots: hunt the nearest free podGAN when IT, otherwise flee the nearest hunter, body-hop and ink to escape
-const dist = (a, b) => hypot(SW.P[a * 3] - SW.P[b * 3], SW.P[a * 3 + 1] - SW.P[b * 3 + 1], SW.P[a * 3 + 2] - SW.P[b * 3 + 2]);
-// a wild podGAN within reach of podGAN i that scores best by fn (or -1)
-function wildNear(i, fn) {
-  let best = -1, bs = -1e9;
-  for (let k = 0; k < 160; k++) {
-    const c = floor(Math.random() * NPOD); if (SW.own[c] >= 0) continue;
-    const d = dist(i, c); if (d < 4 || d > 42) continue;
-    const sc = fn(c, d); if (sc > bs) { bs = sc; best = c; }
-  }
-  return best;
-}
-// a bot jets podGAN i along (dx, dy, dz) at a m/s²
-function botJet(i, dx, dy, dz, a, dt) {
-  const { V, H, cn } = SW, j = i * 3, l = hypot(dx, dy, dz) || 1, k = a * dt / l;
-  V[j] += dx * k; V[j + 1] += dy * k; V[j + 2] += dz * k;
-  H[j] = dx / l; H[j + 1] = dy / l * 0.6; H[j + 2] = dz / l;
-  cn[i] = 0.5 + 0.5 * sin(F[TIME] * 16 + i);
-}
-const pearlDist = (i, k) => { const [x, y, z] = pearlAt(k), j = i * 3; return hypot(SW.P[j] - x, SW.P[j + 1] - y, SW.P[j + 2] - z); };
-// Hiders go pearl hunting in bursts of jets, and flee (hop, ink) when a hunter comes close. Hunters ping now and
-// then, chase whoever their sonar found (or who swam suspiciously fast nearby, or flickered), and guess; now and
-// then they guess wrong.
-function bots(dt) {
-  const S = NET.solo; if (!S) return;
-  S.game.tick();
-  const { P, V } = SW, play = NET.state === 'play';
-  const who = allIds().map((id) => [id, id === NET.id ? PL.pod : NET.players.get(id)?.pod ?? -1]).filter(([, pod]) => pod >= 0);
-  const flick = flickering();
-  for (const [id, b] of S.bots) {
-    const p = NET.players.get(id); if (!p || SW.own[p.pod] !== id) continue;
-    const i = p.pod, j = i * 3;
-    b.hop -= dt; b.ink -= dt; b.burst -= dt; b.pt -= dt; b.ping -= dt; b.guess -= dt;
-    if (b.boost > 0) { jetOut(i, ...b.bd, dt, (b.boost -= dt)); continue; } // inked: jets flat out, straight away
-    if (!play || F[TIME] < b.stun) continue;
-    if (isIt(id)) {
-      // sonar every 14-24 s: hiders close by are marked for a while
-      if (b.ping <= 0 && S.game.ping(id)) {
-        b.ping = 14 + Math.random() * 10;
-        for (const [q, qi] of who) if (!isIt(q) && dist(i, qi) < PING_R) { b.mark = q; b.mt = F[TIME] + 7; }
-      }
-      // ...and so are hiders seen jetting close by, or flickering
-      for (const [q, qi] of who) {
-        if (isIt(q)) continue;
-        const d = dist(i, qi), k = qi * 3;
-        if ((d < 22 && hypot(V[k], V[k + 1], V[k + 2]) > 3.5) || (flick && d < 70)) { if (b.mark !== q || d < 22) { b.mark = q; b.mt = F[TIME] + 6; } }
-      }
-      const mp = b.mark != null && F[TIME] < b.mt ? (b.mark === NET.id ? PL.pod : NET.players.get(b.mark)?.pod ?? -1) : -1;
-      if (mp >= 0 && !isIt(b.mark)) {
-        const d = dist(i, mp), k = mp * 3;
-        botJet(i, P[k] - P[j], P[k + 1] - P[j + 1], P[k + 2] - P[j + 2], d > 14 ? 10 : 4, dt);
-        if (d < 12) { b.lock += dt; if (b.lock > b.need) {
-          b.lock = 0; b.need = 0.5 + Math.random() * 1.2;
-          // usually right; sometimes it grabs a wild one next to them instead
-          if (Math.random() < 0.75) S.game.jump(id, mp); else { const c = wildNear(i, (c) => -dist(c, mp)); if (c >= 0) S.game.jump(id, c); }
-        } }
-      } else {
-        b.mark = null;
-        // nobody marked: lurk around the pearls in bursts, and now and then take a wild guess at something close
-        if (b.pt <= 0 || b.pk == null || b.pk >= NET.pearls.length) { b.pk = floor(Math.random() * NET.pearls.length); b.pt = 6 + Math.random() * 6; }
-        if (b.burst <= 0) b.burst = b.on ? 1.5 + Math.random() * 2 : 1 + Math.random() * 1.5, b.on = !b.on;
-        if (b.on && b.pk != null) { const [x, y, z] = pearlAt(b.pk); botJet(i, x - P[j], y - P[j + 1], z - P[j + 2], 7, dt); }
-        if (b.guess <= 0) { b.guess = 18 + Math.random() * 15; const c = wildNear(i, (c, d) => -d); if (c >= 0 && dist(i, c) < 12) S.game.jump(id, c); }
-      }
-    } else {
-      // hider: flee a hunter that's close, else go for pearls
-      let hi = -1, hd = 1e9;
-      for (const [q, qi] of who) if (isIt(q)) { const d = dist(i, qi); if (d < hd) { hd = d; hi = qi; } }
-      if (hi >= 0 && hd < 25) {
-        const k = hi * 3, dx = P[j] - P[k], dy = (P[j + 1] - P[k + 1]) * 0.5, dz = P[j + 2] - P[k + 2];
-        if (hd < 9 && b.ink <= 0) { botInk(id, b, i, dx, dy, dz); continue; }
-        if (hd < 18 && b.hop <= 0) { const c = wildNear(i, (c) => dist(c, hi)); if (c >= 0 && dist(c, hi) > hd + 8) S.game.jump(id, c); b.hop = 3 + Math.random() * 4; continue; }
-        if (hd > 12) continue; // keep still and blend in, mostly
-        botJet(i, dx, dy, dz, 6, dt);
-        continue;
-      }
-      if (b.pt <= 0 || b.pk == null || b.pk >= NET.pearls.length) {
-        let bk = -1, bd = 1e9; for (let k = 0; k < NET.pearls.length; k++) { const d = pearlDist(i, k) + Math.random() * 15; if (d < bd) { bd = d; bk = k; } }
-        b.pk = bk; b.pt = 4 + Math.random() * 4;
-      }
-      if (b.pk < 0) continue;
-      const pd = pearlDist(i, b.pk);
-      if (pd > 45 && b.hop <= 0) { const c = wildNear(i, (c) => -pearlDist(c, b.pk)); if (c >= 0 && pearlDist(c, b.pk) < pd - 15) S.game.jump(id, c); b.hop = 2 + Math.random() * 3; continue; }
-      if (b.burst <= 0) b.burst = b.on ? 1 + Math.random() * 2 : 1.5 + Math.random() * 3, b.on = !b.on;
-      if (b.on || pd < 6) { const [x, y, z] = pearlAt(b.pk); botJet(i, x - P[j], y - P[j + 1], z - P[j + 2], pd < 6 ? 4 : 8, dt); }
-      const k = takePearl(i, false);
-      if (k >= 0) { S.game.pearl(id, k); b.pt = 0; }
-    }
-  }
-}
-// bot id squirts ink and jets away along (dx, dy, dz)
-function botInk(id, b, i, dx, dy, dz) {
-  if (!NET.solo.game.ink(id)) return false;
-  addInk(...inkAt(i, dx, dy, dz)); b.ink = INK_GAP; b.boost = ESCAPE; b.bd = [dx, dy, dz];
-  return true;
-}
+
 function game(dt) {
   // other players' podGANs glide toward what they last reported
   const { P, V, U, L, cn } = SW, k = min(1, dt * 10);
   for (const p of NET.players.values()) {
-    const m = p.tp; if (p.bot || !m || SW.own[p.pod] !== p.id) continue;
+    const m = p.tp; if (!m || SW.own[p.pod] !== p.id) continue;
     const j = p.pod * 3;
     for (let a = 0; a < 3; a++) { m.p[a] += m.v[a] * dt; P[j + a] += (m.p[a] - P[j + a]) * k; V[j + a] = m.v[a]; U[j + a] += (m.u[a] - U[j + a]) * k; L[j + a] += (m.l[a] - L[j + a]) * k; }
     cn[p.pod] = m.c;
   }
-  bots(dt);
-  hunterBeep(dt);
-  if (resEl.className) { const e = resEl.querySelector('i'); if (e) e.textContent = max(0, Math.ceil((NET.next - performance.now()) / 1000)); }
+  drawIt(dt);
+  if (resEl.className) {
+    const e = resEl.querySelector('i'), left = (LAP.next - performance.now()) / 1000;
+    if (e) e.textContent = max(0, Math.ceil(left));
+    if (left <= 0) lapStart();
+  }
   if ($('sb').className) drawScores();
-  drawIt();
   if (!NET.online) return;
   if ((NET.sendT -= dt) <= 0 && PL.pod >= 0) {
     NET.sendT = 1 / 15;
@@ -1258,52 +1000,44 @@ function game(dt) {
   }
   if (NET.host && (NET.podT -= dt) <= 0) { NET.podT = 0.5; podSend(); }
 }
-// floating names over the other players' podGANs (IT in red)
+// floating names over the other players' podGANs, and an arrow to the next gate when it's off screen
 const lbls = [];
 function labels() {
   let n = 0;
   const cx = F[CX], cy = F[CY], cz = F[CZ], asp = W / H;
   for (const [id, p] of NET.players) {
-    if (SW.own[p.pod] !== id || !isIt(id)) continue; // only the hunters are named: the hunted stay anonymous
+    if (SW.own[p.pod] !== id) continue;
     const j = p.pod * 3, s = SW.g[p.pod].size, x = SW.P[j] + SW.U[j] * s * 22 - cx, y = SW.P[j + 1] + SW.U[j + 1] * s * 22 - cy, z0 = SW.P[j + 2] + SW.U[j + 2] * s * 22 - cz;
     const z = x * F[FX] + y * F[FY] + z0 * F[FZ]; if (z < 0.5 || z > 90) continue;
     const sx = (x * F[RX] + z0 * F[RZ]) / (z * TANH * asp), sy = (x * F[UX] + y * F[UY] + z0 * F[UZ]) / (z * TANH);
     if (abs(sx) > 1.1 || abs(sy) > 1.1) continue;
     let e = lbls[n]; if (!e) { e = lbls[n] = document.createElement('p'); lblEl.append(e); }
-    e.textContent = p.name + (isIt(id) ? ' · IT' : ''); e.className = isIt(id) ? 'it' : 'free';
+    e.textContent = p.name; e.className = 'free';
     e.style.left = `${(sx * 0.5 + 0.5) * 100}%`; e.style.top = `${(0.5 - sy * 0.5) * 100}%`; e.style.display = '';
     n++;
   }
   for (let k = n; k < lbls.length; k++) lbls[k].style.display = 'none';
-  arrows();
+  arrow();
 }
-// sonar arrows: for a few seconds after a ping, every player it heard who is far away or off screen gets an arrow
-// round the edge of the view pointing their way, with how far they are
-const arws = [], ARROW_T = 4;
-function arrows() {
-  let n = 0;
-  if (PL.pod >= 0) {
-    const j0 = PL.pod * 3, asp = W / H, cx = F[CX], cy = F[CY], cz = F[CZ];
-    for (const [id, t] of heard) {
-      const age = F[TIME] - t, p = NET.players.get(id);
-      if (age > ARROW_T || !p || SW.own[p.pod] !== id) continue;
-      const k = p.pod * 3, d = hypot(SW.P[k] - SW.P[j0], SW.P[k + 1] - SW.P[j0 + 1], SW.P[k + 2] - SW.P[j0 + 2]);
-      const x = SW.P[k] - cx, y = SW.P[k + 1] - cy, z0 = SW.P[k + 2] - cz;
-      const z = x * F[FX] + y * F[FY] + z0 * F[FZ];
-      let sx = (x * F[RX] + z0 * F[RZ]) / (abs(z) * TANH * asp + 1e-6), sy = (x * F[UX] + y * F[UY] + z0 * F[UZ]) / (abs(z) * TANH + 1e-6);
-      const on = z > 0.5 && abs(sx) < 0.9 && abs(sy) < 0.9;
-      if (on && d < PING_R) continue; // close and in view: the ghost shows where they are
-      if (z <= 0.5 && abs(sx) < 0.05 && abs(sy) < 0.05) sy = -1; // right behind you: point down
-      const ang = Math.atan2(-sy, sx);
-      let e = arws[n]; if (!e) { e = arws[n] = document.createElement('div'); e.className = 'arw'; e.innerHTML = '<b>➤</b><span></span>'; lblEl.append(e); }
-      e.style.left = `${50 + Math.cos(ang) * 42}%`; e.style.top = `${50 + Math.sin(ang) * 40}%`;
-      e.firstChild.style.transform = `rotate(${ang}rad)`;
-      e.lastChild.textContent = `${Math.round(d)} m`;
-      e.classList.toggle('it', isIt(id)); e.style.opacity = min(1, (ARROW_T - age) * 1.5); e.style.display = '';
-      n++;
-    }
+let arw = null;
+function arrow() {
+  if (!arw) { arw = document.createElement('div'); arw.className = 'arw'; arw.innerHTML = '<b>➤</b><span></span>'; lblEl.append(arw); }
+  if (!LAP.on || PL.pod < 0 || !GATES.length) { arw.style.display = 'none'; return; }
+  const g = GATES[LAP.gate], j0 = PL.pod * 3, asp = W / H;
+  const d = hypot(g[0] - SW.P[j0], g[1] - SW.P[j0 + 1], g[2] - SW.P[j0 + 2]);
+  const x = g[0] - F[CX], y = g[1] - F[CY], z0 = g[2] - F[CZ], z = x * F[FX] + y * F[FY] + z0 * F[FZ];
+  let sx = (x * F[RX] + z0 * F[RZ]) / (abs(z) * TANH * asp + 1e-6), sy = (x * F[UX] + y * F[UY] + z0 * F[UZ]) / (abs(z) * TANH + 1e-6);
+  const on = z > 0.5 && abs(sx) < 0.85 && abs(sy) < 0.85;
+  arw.lastChild.textContent = `${LAP.gate === 0 ? '🏁' : `gate ${LAP.gate}`} · ${Math.round(d)} m`;
+  if (on) { // in view: the label sits on the gate
+    arw.firstChild.style.display = 'none'; arw.style.left = `${(sx * 0.5 + 0.5) * 100}%`; arw.style.top = `${(0.5 - sy * 0.5) * 100 - 6}%`;
+  } else {
+    if (z <= 0.5 && abs(sx) < 0.05 && abs(sy) < 0.05) sy = -1;
+    const ang = Math.atan2(-sy, sx);
+    arw.firstChild.style.display = ''; arw.firstChild.style.transform = `rotate(${ang}rad)`;
+    arw.style.left = `${50 + Math.cos(ang) * 42}%`; arw.style.top = `${50 + Math.sin(ang) * 40}%`;
   }
-  for (let k = n; k < arws.length; k++) arws[k].style.display = 'none';
+  arw.style.display = '';
 }
 
 function frame(now) {
@@ -1347,6 +1081,7 @@ function frame(now) {
   pilot(dt);
   game(dt);
   render();
+  grabPhoto();
   if (hud) {
     hN++; if (dtr > hMax) hMax = dtr; if (dtr < hMin) hMin = dtr; if (dtr > hPer * 1.5) { hLate++; hTot++; }
     F[HUDT] += dtr / 1000;
@@ -1362,7 +1097,6 @@ const key = (e, v) => {
     default: if (v && !e.repeat) {
       if (e.code === 'KeyH') { hud = !hud; hTot = 0; hPer = 1e9; info.textContent = ''; }
       else if (e.code === 'KeyM') mute();
-      else if (e.code === 'KeyF') ping();
       else if (e.code === 'KeyV') voxOn = !voxOn;
       else if (e.code === 'Escape') ui(true);
     }
@@ -1375,14 +1109,13 @@ addEventListener('keydown', (e) => {
   if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1);
 });
 addEventListener('keyup', (e) => { if (e.code === 'Tab') $('sb').className = ''; });
-// left: jump into the podGAN in your sights, or else jet (tap for one jet, hold for full jets); right: ink;
-// middle (or F): sonar
+// left: take a photo (or, after a lap, start the next); right: jets (tap for one kick, hold for full jets)
 addEventListener('mousedown', (e) => {
   if (menu || document.pointerLockElement !== canvas) return;
-  if (e.button === 0) { if (PL.tgt >= 0) jump(); else { jetTap(); PL.jetDown = true; } }
-  else if (e.button === 2) squirt(); else if (e.button === 1) { e.preventDefault(); ping(); }
+  if (e.button === 0) { if (resEl.className) lapStart(); else photo(); }
+  else if (e.button === 2) { jetTap(); PL.jetDown = true; }
 });
-addEventListener('mouseup', (e) => { if (e.button === 0) PL.jetDown = false; });
+addEventListener('mouseup', (e) => { if (e.button === 2) PL.jetDown = false; });
 addEventListener('contextmenu', (e) => { if (!menu) e.preventDefault(); });
 addEventListener('keyup', (e) => key(e, 0));
 const release = () => { kf = kb = kl = kr = ku = kd = ks = kj = 0; tId = -1; tN = 0; };
@@ -1427,7 +1160,8 @@ document.addEventListener('pointerlockchange', () => ui(!document.pointerLockEle
 
 // draw the first frame and wait for the GPU to finish it (pipelines get compiled on first use) before the reveal
 lookAt(...POSES[0]);
-soloStart();
+become(floor(Math.random() * NPOD), true);
+lapStart();
 netStart();
 await say('Letting the light in…', 1, 400);
 render(); await Q.onSubmittedWorkDone();
