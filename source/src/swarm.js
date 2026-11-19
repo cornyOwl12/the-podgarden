@@ -10,6 +10,8 @@ const pcg = (v) => { const s = (Math.imul(v, 747796405) + 2891336453) >>> 0; con
 const ih = (s, k) => (pcg((pcg(s) + k) >>> 0) >>> 8) / 16777216;
 // named for how it looks: its colour scheme (the same pick as the shader's G.pt), then its size
 const PALETTES = ['Flaming', 'Frozen', 'Phantom', 'Inkfish', 'Rainbow'];
+// half rainbow, inkfish 1 in 128, the rest three ways (same thresholds as the shader)
+const palette = (r) => r < 21 / 128 ? 0 : r < 42 / 128 ? 1 : r < 63 / 128 ? 2 : r < 0.5 ? 3 : 4;
 const sizeName = (size) => size < 0.085 ? 'Squidder' : size < 0.097 ? 'Squid' : size < 0.12 ? 'Octopod' : 'Kraken';
 function podGenome(s) {
   const ty = floor(ih(s, 0) * 8), ad = floor(ih(s, 1) * 9);
@@ -18,5 +20,5 @@ function podGenome(s) {
   // jet rhythm: seconds per pulse, and the speed one pulse gives (m/s)
   let per = 1.6 + ih(s, 3) * 1.2, jet = 1.6 + ih(s, 18) * 1.2;
   if (ad === 0) { per *= 1.6; jet *= 0.6; } if (ad === 6) { per *= 1.5; jet *= 0.8; } if (ty === 3) { per *= 0.7; jet *= 1.5; } if (ty === 5) jet *= 1.2;
-  return { ty, ad, size, per, jet, name: `${PALETTES[min(floor(ih(s, 4) * 5), 4)]} ${sizeName(size)}` };
+  return { ty, ad, size, per, jet, name: `${PALETTES[palette(ih(s, 4))]} ${sizeName(size)}` };
 }

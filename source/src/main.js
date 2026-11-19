@@ -689,7 +689,7 @@ function packSwarm() {
 // file, GitHub Pages, or alone on the server) you play against 7 bots, with the same rules running in the browser.
 const NET = { ws: null, id: 0, host: true, online: false, solo: null, players: new Map(), its: new Set(), at: new Map(), tags: new Map(),
   state: 'wait', n: 0, t0: 0, next: 0, res: null, sendT: 0, podT: 0 };
-const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9, boost: 0, entering: false, enterAt: 0, beepT: 0 };
+const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9, boost: 0, jetDown: false, entering: false, enterAt: 0, beepT: 0 };
 const INK_GAP = 60, INK_LIFE = 14;
 // sonar: left-click open water to ping. Players within PING_R metres show through everything for SEEN seconds
 const PING_GAP = 5, PING_R = 70, SEEN = 3, ESCAPE = 1.5;
@@ -1007,6 +1007,7 @@ function inkData() {
   return inkArr;
 }
 // ink escape: jets flat out along (dx, dy, dz), heading that way too so the swarm drift doesn't fight it
+function jetTap() { if (PL.pt < 0 || PL.pt > 0.25) { PL.pt = 0; PL.kicked = false; } }
 function jetOut(i, dx, dy, dz, dt, left) {
   const { V, H, cn } = SW, j = i * 3, l = hypot(dx, dy, dz) || 1, a = 48 * dt / l;
   V[j] += dx * a; V[j + 1] += dy * a; V[j + 2] += dz * a;
@@ -1021,7 +1022,7 @@ function pilot(dt) {
   const iw = INK_GAP - (F[TIME] - PL.inkT);
   const pw = PING_GAP - (F[TIME] - PL.pingT);
   inkEl.innerHTML = (iw > 0 ? `🦑 Ink refills in ${Math.ceil(iw)} s` : '<b>🦑 Ink ready · right-click</b>') + '<br>' +
-    (pw > 0 ? `📡 Sonar recharging · ${Math.ceil(pw)} s` : '<b>📡 Sonar ready · left-click open water</b>');
+    (pw > 0 ? `📡 Sonar recharging · ${Math.ceil(pw)} s` : '<b>📡 Sonar ready · F or middle-click</b>');
   const i = PL.pod; if (i < 0) return;
   const { P, V, U, cn } = SW, j = i * 3, s = SW.g[i].size;
   const cp = cos(F[PIT]), fx = cp * sin(F[YAW]), fy = sin(F[PIT]), fz = -cp * cos(F[YAW]);
@@ -1029,6 +1030,17 @@ function pilot(dt) {
   // your podGAN drifts with the swarm like any other (swim() moves it). Squirting ink fires its jets flat out for
   // a moment: a fast escape the way you're looking
   if (PL.boost > 0) jetOut(i, fx, fy, fz, dt, (PL.boost -= dt));
+  else {
+    // left-click jets: a tap draws in for 0.18 s then kicks once; held, full jets pulsing the way you look
+    PL.hold = PL.jetDown ? PL.hold + dt : 0;
+    if (PL.pt >= 0) {
+      PL.pt += dt;
+      if (PL.pt >= 0.18 && !PL.kicked) { PL.kicked = true; V[j] += fx * 4.5; V[j + 1] += fy * 4.5; V[j + 2] += fz * 4.5; }
+      cn[i] = PL.pt < 0.18 ? PL.pt / 0.18 : max(0, 1 - (PL.pt - 0.18) / 0.17);
+      if (PL.pt > 0.35) PL.pt = -1;
+    }
+    if (PL.hold > 0.25) { const a = 11 * dt; V[j] += fx * a; V[j + 1] += fy * a; V[j + 2] += fz * a; cn[i] = 0.5 + 0.5 * sin(F[TIME] * 16); }
+  }
   const px = P[j], py = P[j + 1], pz = P[j + 2];
   // camera: behind and above (the aim starts 35 degrees down), flying over after a jump, pulled in by rock
   const tx = px + U[j] * s * 8, ty = py + U[j + 1] * s * 8, tz = pz + U[j + 2] * s * 8, kc = PL.snap ? 1 : min(1, dt * 6);
@@ -1221,6 +1233,7 @@ const key = (e, v) => {
     default: if (v && !e.repeat) {
       if (e.code === 'KeyH') { hud = !hud; hTot = 0; hPer = 1e9; info.textContent = ''; }
       else if (e.code === 'KeyM') mute();
+      else if (e.code === 'KeyF') ping();
       else if (e.code === 'KeyV') voxOn = !voxOn;
       else if (e.code === 'Escape') ui(true);
     }
@@ -1233,7 +1246,14 @@ addEventListener('keydown', (e) => {
   if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1);
 });
 addEventListener('keyup', (e) => { if (e.code === 'Tab') $('sb').className = ''; });
-addEventListener('mousedown', (e) => { if (menu || document.pointerLockElement !== canvas) return; if (e.button === 0) { if (PL.tgt >= 0) jump(); else ping(); } else if (e.button === 2) squirt(); });
+// left: jump into the podGAN in your sights, or else jet (tap for one jet, hold for full jets); right: ink;
+// middle (or F): sonar
+addEventListener('mousedown', (e) => {
+  if (menu || document.pointerLockElement !== canvas) return;
+  if (e.button === 0) { if (PL.tgt >= 0) jump(); else { jetTap(); PL.jetDown = true; } }
+  else if (e.button === 2) squirt(); else if (e.button === 1) { e.preventDefault(); ping(); }
+});
+addEventListener('mouseup', (e) => { if (e.button === 0) PL.jetDown = false; });
 addEventListener('contextmenu', (e) => { if (!menu) e.preventDefault(); });
 addEventListener('keyup', (e) => key(e, 0));
 const release = () => { kf = kb = kl = kr = ku = kd = ks = kj = 0; tId = -1; tN = 0; };

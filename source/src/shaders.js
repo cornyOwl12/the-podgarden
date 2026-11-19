@@ -904,14 +904,17 @@ struct Gn { s: u32, ty: i32, ad: i32, mode: i32, pt: i32, fsat: f32, fval: f32, 
 fn genome(s: u32) -> Gn {
   var G: Gn; G.s = s;
   G.ty = min(i32(ih(s, 0u) * 8.), 7); G.ad = min(i32(ih(s, 1u) * 9.), 8);
-  // the colour scheme, which names it too (swarm.js): 0 flaming, 1 frozen, 2 phantom (see-through), 3 inkfish, 4 rainbow
-  G.pt = min(i32(ih(s, 4u) * 5.), 4);
+  // the colour scheme, which names it too (swarm.js): 0 flaming, 1 frozen, 2 phantom (see-through), 3 inkfish, 4 rainbow.
+  // half are rainbow, inkfish are rare (1 in 128), the rest split three ways. Thresholds are k/128, exact in f32
+  // and in JS alike, so swarm.js names them the same
+  let rp = ih(s, 4u);
+  G.pt = select(select(select(select(4, 3, rp < .5), 2, rp < 63. / 128.), 1, rp < 42. / 128.), 0, rp < 21. / 128.);
   let r5 = ih(s, 5u); let r6 = ih(s, 6u);
   G.sat = .9; G.val = .9; G.fsat = .85; G.fval = .45;
   if (G.pt == 0) {        // flaming: reds into oranges, a dark ember frame
-    G.mode = 1; G.h0 = .995 + r5 * .03; G.h1 = .045 + r6 * .05; G.fh = .99; G.sat = .95; G.val = .95; G.fsat = .9; G.fval = .3;
+    G.mode = 1; G.h0 = .995 + r5 * .02; G.h1 = .03 + r6 * .04; G.fh = .99; G.sat = 1.; G.val = 1.; G.fsat = 1.; G.fval = .35;
   } else if (G.pt == 1) { // frozen: icy blues
-    G.mode = 1; G.h0 = .52 + r5 * .08; G.h1 = .58 + r6 * .07; G.fh = .64; G.sat = .6; G.val = .95; G.fsat = .8; G.fval = .4;
+    G.mode = 1; G.h0 = .55 + r5 * .07; G.h1 = .6 + r6 * .05; G.fh = .66; G.sat = .9; G.val = 1.; G.fsat = 1.; G.fval = .45;
   } else if (G.pt == 2) { // phantom: pale and ghostly, drawn see-through
     G.mode = 0; G.h0 = .68 + r5 * .2; G.h1 = G.h0 + .05; G.fh = G.h0; G.sat = .2; G.val = 1.; G.fsat = .4; G.fval = .65;
   } else if (G.pt == 3) { // inkfish: inky blacks with a hint of purple
@@ -1186,7 +1189,7 @@ fn near(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
   let wp = g.cam.xyz + rd * ((t0 + te) * s);
   let z = zone(wp); let vv = vol(wp);
   let E = sunE(wp.y, z);
-  var cc = f.rgb * (E * (.3 + .7 * sat(dot(n, g.sun.xyz))) + amb(wp, n, vv.g, z) * 1.3) + f.rgb * select(select(select(.3, .7, f.w == 2.), .9, G.pt == 2), .75, G.pt == 0 && f.w < 2.); // phantoms glow pale, flaming ones like embers
+  var cc = f.rgb * (E * (.3 + .7 * sat(dot(n, g.sun.xyz))) + amb(wp, n, vv.g, z) * 1.3) + f.rgb * select(select(select(.3, .7, f.w == 2.), .9, G.pt == 2), 1.1, G.pt <= 1 && f.w < 2.); // phantoms glow pale, flaming and frozen ones bright
   cc *= select(select(.8, .9, ax == 0), select(.7, 1., nl.y > 0.), ax == 1);
   var fo: FO;
   fo.c = vec4f(fin(fog(cc, wp, z)).rgb, -8.);
