@@ -601,11 +601,21 @@ function swim(dt) {
     let p = ph[i] + dt / G.per;
     if (p >= 1) {
       p -= 1; const q = SW.pc[i] = (SW.pc[i] + 1) & 65535, rn = (k) => ih(i * 7919 + q, k) - 0.5; // same turns for every player
-      let ox = O[j] - px, oy = O[j + 1] - py, oz = O[j + 2] - pz; const od = hypot(ox, oy, oz) + 1e-6, pull = od > roam[i] ? 1.4 * od / roam[i] : 0.25;
-      hx += rn(0) * 1.4 + ox / od * pull; hy += rn(1) * 0.7 + oy / od * pull + (py > -5 ? -0.8 : 0); hz += rn(2) * 1.4 + oz / od * pull;
-      const tx = px - cx, ty = py - cy, tz = pz - cz, td = hypot(tx, ty, tz);
-      if (td < 4 && i !== PL.pod) { hx += tx / td; hy += ty / td; hz += tz / td; } // startled by the swimmer
-      hy *= 0.6; const l = hypot(hx, hy, hz) + 1e-6; hx /= l; hy /= l; hz /= l;
+      if (i === PL.pod) { // yours swims the general way you are looking, wandering a little each pulse
+        hx = F[FX] + rn(0) * 0.6; hy = F[FY] + rn(1) * 0.3; hz = F[FZ] + rn(2) * 0.6;
+      } else {
+        let ox = O[j] - px, oy = O[j + 1] - py, oz = O[j + 2] - pz; const od = hypot(ox, oy, oz) + 1e-6, pull = od > roam[i] ? 1.4 * od / roam[i] : 0.25;
+        hx += rn(0) * 1.4 + ox / od * pull; hy += rn(1) * 0.7 + oy / od * pull + (py > -5 ? -0.8 : 0); hz += rn(2) * 1.4 + oz / od * pull;
+        const tx = px - cx, ty = py - cy, tz = pz - cz, td = hypot(tx, ty, tz);
+        if (td < 4) { hx += tx / td; hy += ty / td; hz += tz / td; } // startled by the swimmer
+        hy *= 0.6;
+      }
+      const l = hypot(hx, hy, hz) + 1e-6; hx /= l; hy /= l; hz /= l;
+    }
+    if (i === PL.pod) { // and turns toward where you look between pulses too; its home moves with it
+      const k = min(1, dt * 1.5); hx += (F[FX] - hx) * k; hy += (F[FY] * 0.8 - hy) * k; hz += (F[FZ] - hz) * k;
+      const l = hypot(hx, hy, hz) + 1e-6; hx /= l; hy /= l; hz /= l;
+      O[j] = px; O[j + 1] = py; O[j + 2] = pz;
     }
     ph[i] = p;
     cn[i] = p < 0.55 ? 0.5 - 0.5 * cos(p / 0.55 * PI) : p < 0.7 ? 1 - (p - 0.55) / 0.15 : 0;
