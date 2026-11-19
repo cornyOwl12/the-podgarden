@@ -664,6 +664,7 @@ function packSwarm() {
   for (const [id, p] of NET.players) if (id !== NET.id && SW.own[p.pod] === id) outl.set(p.pod, 3);
   for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
     const dx = P[j] - cx, dy = P[j + 1] - cy, dz = P[j + 2] - cz, d = hypot(dx, dy, dz), G = g[i], r = G.size * 26;
+    if (i === PL.pod) continue; // you don't see your own podGAN: the view is its eyes
     if (d > far + r && !outl.has(i)) continue;
     const z = dx * fx + dy * fy + dz * fz;
     if (z < -r || abs(dx * rx + dz * rz) - r > z * tx + r || abs(dx * ux + dy * uy + dz * uz) - r > z * TANH + r) continue;
@@ -681,8 +682,7 @@ function packSwarm() {
 }
 
 // ============================================================================ the game: podGAN Photo Lap
-// You are a podGAN: one of the swarm, seen from behind and above, drawn as a wireframe so you can see through
-// yourself. It rides the same route round the garden every lap while you look around, and on the way you take
+// You are a podGAN: one of the swarm, seeing through its eyes. It rides the same route round the garden every lap while you look around, and on the way you take
 // 3 photos (left-click). Each podGAN in a photo scores by how rare it is
 // (rainbows are everywhere, inkfish are 1 in 128, krakens are worth more), plus a crowd bonus for lots in one
 // shot and a bonus for every matching pair. Your lap score is your three photos.
@@ -728,7 +728,8 @@ function become(i, snap) {
 // The same ride every lap: a smooth loop round the garden through 8 waypoints. Each waypoint is the home of the wild
 // podGAN nearest a point on a 42 m circle (homes are always open water); the loop between them is a Catmull-Rom
 // spline, lifted wherever it would pass through rock, sampled every half metre.
-const SPEED = 3.5, ROUTE = []; // [x, y, z] every STEP metres
+const LAP_S = 60, ROUTE = []; // [x, y, z] every STEP metres
+let SPEED = 4; // metres a second: set so a lap takes LAP_S seconds
 const STEP = 0.5;
 function course() {
   if (ROUTE.length) return;
@@ -762,6 +763,7 @@ function course() {
     while (d <= l) { const t = d / l; ROUTE.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]); d += STEP; }
     carry = l - (d - STEP);
   }
+  SPEED = ROUTE.length * STEP / LAP_S;
 }
 // the point d metres along the route, and the way it heads
 function routeAt(d) {
@@ -964,13 +966,8 @@ function pilot(dt) {
   // your podGAN rides the route (ride()); you just look around
   ride(dt);
   cn[i] = 0.5 + 0.5 * sin(F[TIME] * 5);
-  const px = P[j], py = P[j + 1], pz = P[j + 2];
-  // camera: behind and above, pulled in by rock
-  const tx = px + U[j] * s * 8, ty = py + U[j + 1] * s * 8, tz = pz + U[j + 2] * s * 8, kc = PL.snap ? 1 : min(1, dt * 6);
-  PL.cx += (tx - PL.cx) * kc; PL.cy += (ty - PL.cy) * kc; PL.cz += (tz - PL.cz) * kc; PL.snap = false;
-  let D = 1.2 + s * 28;
-  for (let d = 0.4; d < D; d += 0.25) if (sdAt(PL.cx - fx * d, PL.cy - fy * d, PL.cz - fz * d) > -0.25) { D = max(d - 0.25, 0.3); break; }
-  F[CX] = PL.cx - fx * D; F[CY] = min(PL.cy - fy * D, -1); F[CZ] = PL.cz - fz * D;
+  // camera: where your podGAN's eyes are (its body isn't drawn)
+  F[CX] = P[j] + U[j] * s * 8; F[CY] = min(P[j + 1] + U[j + 1] * s * 8, -1); F[CZ] = P[j + 2] + U[j + 2] * s * 8; PL.snap = false;
   tagEl.className = ''; $('x').className = '';
 }
 
