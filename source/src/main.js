@@ -109,6 +109,7 @@ const pBub = scenePipe(mSpr, 'vsBub', 'fsBub', [ibBub], { strip: true, blend: { 
 const ADD = { color: { srcFactor: 'one', dstFactor: 'one' }, alpha: { srcFactor: 'one', dstFactor: 'one' } };
 const pSnow = scenePipe(mSpr, 'vsSnow', 'fsSnow', [ibSnow], { strip: true, blend: ADD });
 const pPod = scenePipe(mod(W_POD), 'vs', 'fs', [{ arrayStride: 32, stepMode: 'instance', attributes: [A(0, 0, 'float32x4'), A(1, 16, 'float32x4')] }], { cull: 'front' });
+const pPearl = scenePipe(mod(W_PEARL), 'vs', 'fs', [ibBub], { strip: true, blend: ADD });
 const pSwarm = scenePipe(mod(W_SWARM), 'vs', 'fs', [{ arrayStride: 48, stepMode: 'instance', attributes: [A(0, 0, 'float32x4'), A(1, 16, 'float32x4'), A(2, 32, 'float32x4')] }], { cull: 'front' });
 const pGl = scenePipe(mLeaf, 'vsGl', 'fsGl', [ibBub], { strip: true, blend: ADD, constants: { ROWS: 7 } });
 const pSolidSh = shadowPipe(mSolid, 'vs', [vbSolid, ibSolid]), pTerrSh = shadowPipe(mSolid, 'vs', [vbSolid, ibSolid], { cull: 'front' });
@@ -303,6 +304,7 @@ const SW = { P: new Float32Array(NPOD * 3), V: new Float32Array(NPOD * 3), H: ne
     SW.ph[i] = Math.random(); SW.roam[i] = 8 + Math.random() * 14;
   }
 }
+SW.home = SW.O.slice(); // where each podGAN started: pearls sit at these (always open water)
 D = Wd.gy = T.smp = null; // with gy goes the generator's working memory (about 200 MB)
 
 await say('Building set pieces…', 0.94, 1200);
@@ -329,6 +331,8 @@ const ibBig = buf(new Uint8Array(Wd.big.buf), BU.VERTEX), ibBigF = buf(new Uint8
 const ibFish = buf(Wd.fish, BU.VERTEX), ibManta = buf(Wd.mantas, BU.VERTEX), ibBubbles = buf(Wd.bubbles, BU.VERTEX), ibSnowB = buf(Wd.snow, BU.VERTEX);
 const ibPods = buf(PODS, BU.VERTEX);
 const ibSwarm = device.createBuffer({ size: NPOD * 48, usage: BU.VERTEX | BU.COPY_DST }), swBuf = new Float32Array(NPOD * 12);
+const ibPearl = device.createBuffer({ size: 32 * 32, usage: BU.VERTEX | BU.COPY_DST }), prBuf = new Float32Array(32 * 8);
+let nPearl = 0;
 let nSwarm = 0;
 const ibGl = buf(Wd.glints, BU.VERTEX), nGl = Wd.glints.length / 8;
 const nFish = Wd.fish.length / 8, nManta = Wd.mantas.length / 8, nBub = Wd.bubbles.length / 8, nSnow = Wd.snow.length / 4;
@@ -484,7 +488,7 @@ function render() {
   let ek = (-cy - 8) / 26; ek = ek < 0 ? 0 : ek > 1 ? 1 : ek;
   m[56] = EXPO * (0.6 + 0.4 * ek); m[57] = RAYS; m[58] = det; m[59] = voxOn ? VOXEL : 0;
   Q.writeBuffer(ubo, 0, UB);
-  packSwarm();
+  packSwarm(); packPearls();
   labels();
   Q.writeBuffer(inkBuf, 0, inkData());
   WT[0] = F[TIME]; Q.writeBuffer(uboW, 0, WT);
@@ -529,6 +533,7 @@ function render() {
   r.setPipeline(pBub); r.setVertexBuffer(0, ibBubbles); r.draw(4, nBub);
   r.setPipeline(pGl); r.setVertexBuffer(0, ibGl); r.draw(4, nGl);
   r.setPipeline(pSnow); r.setVertexBuffer(0, ibSnowB); r.draw(4, nSnow);
+  if (nPearl) { r.setPipeline(pPearl); r.setVertexBuffer(0, ibPearl); r.draw(4, nPearl); }
   r.end();
   // rebuild the image out of voxels
   r = e.beginRenderPass(passVox); r.setPipeline(pVox); r.setBindGroup(0, bgVox); r.draw(3); r.end();
@@ -654,10 +659,16 @@ function swim(dt) {
 function packSwarm() {
   const { P, U, L, cn, g } = SW, cx = F[CX], cy = F[CY], cz = F[CZ], fx = F[FX], fy = F[FY], fz = F[FZ], rx = F[RX], rz = F[RZ], ux = F[UX], uy = F[UY], uz = F[UZ];
   const far = 85 * det, tx = TANH * W / H; let n = 0;
-  // every other player's podGAN gets a glowing outline: red while IT, gold while still free
-  const outl = new Map();
-  // ...and while your sonar has found it, it shows through everything
-  for (const [id, p] of NET.players) if (id !== NET.id && SW.own[p.pod] === id) outl.set(p.pod, (NET.its.has(id) ? 2 : 3) + (F[TIME] - (seen.get(id) ?? -1e9) < SEEN ? 2 : 0));
+  // hunters glow red for everyone. Hiders look like any wild podGAN, except to each other (gold), and to the hunters
+  // only while they flicker (every 30 s) or a hunter's sonar has found them (then through everything)
+  const outl = new Map(), meIt = isIt(NET.id), flick = flickering();
+  for (const [id, p] of NET.players) {
+    if (id === NET.id || SW.own[p.pod] !== id) continue;
+    const sn = F[TIME] - (seen.get(id) ?? -1e9) < SEEN ? 2 : 0;
+    if (isIt(id)) outl.set(p.pod, 2 + sn);
+    else if (!meIt || NET.state !== 'play' || flick) outl.set(p.pod, 3);
+    else if (sn) outl.set(p.pod, 5);
+  }
   for (let i = 0, j = 0; i < NPOD; i++, j += 3) {
     const dx = P[j] - cx, dy = P[j + 1] - cy, dz = P[j + 2] - cz, d = hypot(dx, dy, dz), G = g[i], r = G.size * 26;
     if (d > far + r && !outl.has(i)) continue;
@@ -676,25 +687,29 @@ function packSwarm() {
   if (n) Q.writeBuffer(ibSwarm, 0, swBuf, 0, n * 12);
 }
 
-// ============================================================================ the game: podGAN tag
+// ============================================================================ the game: Body Snatchers
 // You are a podGAN: one of the swarm, seen from behind and above, drawn as a wireframe so you can see through
-// yourself. It swims wherever the mouse aims. Right-click squirts a big cloud of ink (once a minute) and fires the
-// jets flat out for a fast escape. Left-click jumps you into the podGAN in the middle of your view, or, aimed at open water,
-// sends a sonar ping (every 5 s) that shows nearby players through everything for a moment.
-// The rules are in tag.js: one player is IT and hunts the rest. Jumping into a free player's podGAN catches them:
-// they become IT too and the podGAN splits in two, one for each of you. When everyone is IT the round is over, the
-// last one caught wins, and a new round starts with everyone in a random podGAN. Other players glow: red when IT,
-// gold while free.
+// yourself. It swims the general way you look; left-click open water to jet, right-click to squirt ink and jet
+// away fast (once a minute), F or middle-click for sonar. Left-click a podGAN to jump into it.
+// The rules are in tag.js. Players look just like wild podGANs. Two hunters (glowing red) look for the hiders:
+// hiders swim through pearls for points and may hop into any wild podGAN; a hunter's jump is a guess. A hider
+// guessed right gets a split-second warning (ink to escape), then hunts too; a wrong guess stuns the hunter and
+// makes the podGAN squeal. Hiders flicker every 30 s; a hunter's sonar reveals hiders close by but goes "bwong"
+// for everyone. 4-minute rounds, three to a match.
 // Opened from the podGARDEN server (server/server.mjs) with friends, the server runs the rules. On your own (a
 // file, GitHub Pages, or alone on the server) you play against 7 bots, with the same rules running in the browser.
 const NET = { ws: null, id: 0, host: true, online: false, solo: null, players: new Map(), its: new Set(), at: new Map(), tags: new Map(),
-  state: 'wait', n: 0, t0: 0, next: 0, res: null, sendT: 0, podT: 0 };
-const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9, boost: 0, jetDown: false, entering: false, enterAt: 0, beepT: 0 };
+  state: 'wait', n: 0, rim: 1, t0: 0, rs: 0, len: 240000, next: 0, res: null, sendT: 0, podT: 0, pearls: [], pts: new Map(), tot: new Map() };
+const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, inkT: -1e9, tgt: -1, jumpT: 0, pingT: -1e9, boost: 0,
+  jetDown: false, entering: false, enterAt: 0, beepT: 0, stun: 0, took: new Map() };
 const INK_GAP = 60, INK_LIFE = 14;
-// sonar: left-click open water to ping. Players within PING_R metres show through everything for SEEN seconds
-const PING_GAP = 5, PING_R = 70, SEEN = 3, ESCAPE = 1.5;
+// sonar: a hunter's ping shows hiders within PING_R metres through everything for SEEN seconds (and everyone hears
+// it); a hider's ping points at every hunter. Every PING_GAP seconds
+const PING_GAP = 6, PING_R = 60, SEEN = 2.5, ESCAPE = 1.5;
 const seen = new Map(); // player id -> when your sonar found them close by
-const heard = new Map(); // player id -> when your sonar last heard them, near or far (for the arrows)
+const heard = new Map(); // player id -> when you last heard them (arrows point at them)
+// hiders flicker into view for the hunters for 1.2 s every 30 s
+const flickering = () => { const el = performance.now() - NET.rs; return NET.state === 'play' && el > 5000 && el % 30000 < 1200; };
 const inks = []; // { x, y, z, t, seed }
 const feedEl = $('feed'), nsEl = $('ns'), nmEl = $('nm'), tagEl = $('n'), itEl = $('itb'), lblEl = $('lbl'), inkEl = $('ink'), resEl = $('res');
 try { nmEl.value = localStorage.podName || ''; } catch {}
@@ -710,26 +725,36 @@ function flash() { body.classList.remove('hurt'); void body.offsetWidth; body.cl
 const esc = (t) => String(t).replace(/[<&]/g, '');
 const allIds = () => [NET.id, ...NET.players.keys()];
 const freeCount = () => allIds().filter((id) => !isIt(id)).length;
-// Tab: who is still free, who is hunting
+const addPts = (id, n) => NET.pts.set(id, (NET.pts.get(id) || 0) + n);
+const mmss = (ms) => { const t = max(0, Math.ceil(ms / 1000)); return `${floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
+// Tab: who hunts, who hides, points this round and this match
 function drawScores() {
-  const now = (performance.now() - NET.t0) / 1000;
-  const rows = allIds().map((id) => [id, id === NET.id ? nmEl.value || 'you' : pname(id), isIt(id), NET.at.get(id), NET.tags.get(id) || 0])
-    .sort((a, b) => (a[2] - b[2]) || ((b[3] ?? 1e9) - (a[3] ?? 1e9)));
-  $('sb').innerHTML = `<p><b>Round ${NET.n || 1}${NET.solo ? ' · vs bots' : ''}</b><b>${freeCount()} free</b><b>Catches</b></p>` + rows.map(([id, n, it, at, k]) =>
-    `<p${it ? ' class=it' : ''}><span>${esc(n)}${id === NET.id ? ' (you)' : ''}</span><span>${!it ? `free · ${Math.floor(now)} s` : at ? `IT · caught at ${Math.floor(at)} s` : 'IT · first hunter'}</span><span>${k}</span></p>`).join('');
+  const rows = allIds().map((id) => [id, id === NET.id ? nmEl.value || 'you' : pname(id), isIt(id), NET.pts.get(id) || 0, NET.tot.get(id) || 0])
+    .sort((a, b) => b[3] - a[3]);
+  $('sb').innerHTML = `<p><b>Round ${NET.rim} of 3${NET.solo ? ' · vs bots' : ''}</b><b>${freeCount()} hiding</b><b>Points</b><b>Match</b></p>` + rows.map(([id, n, it, pt, tot]) =>
+    `<p${it ? ' class=it' : ''}><span>${esc(n)}${id === NET.id ? ' (you)' : ''}</span><span>${it ? (NET.at.has(id) ? '🔴 hunter (caught)' : '🔴 hunter') : '🫥 hider'}</span><span>${pt}</span><span>${tot + pt}</span></p>`).join('');
 }
+// the banner at the top: your role, the clock, what's left
+let itTxt = '';
 function drawIt() {
-  const me = isIt(NET.id), free = freeCount(), hunters = allIds().length - free;
-  itEl.textContent = NET.state === 'wait' ? 'Waiting for players…' : NET.state === 'over' ? 'Round over!'
-    : me ? `You're IT! Catch them all · ${free} still free` : `${hunters} hunting · ${free} still free${free === 1 ? ' (that\'s you!)' : ''}`;
-  itEl.className = me && NET.state === 'play' ? 'me' : '';
+  const me = isIt(NET.id), free = freeCount(), left = NET.len - (performance.now() - NET.rs);
+  let t;
+  if (NET.state === 'wait') t = 'Waiting for players…';
+  else if (NET.state === 'over') t = 'Round over!';
+  else if (performance.now() < PL.stun) t = `😵 Wrong podGAN! Stunned… · ⏱ ${mmss(left)}`;
+  else if (me) t = `🔴 HUNTER · find the hiders: click a podGAN to guess · ${free} hiding · ⏱ ${mmss(left)}`;
+  else t = `🫥 HIDER · grab pearls ⭐, stay hidden${flickering() ? ' · ⚡ YOU\'RE FLICKERING!' : ''} · ${NET.pts.get(NET.id) || 0} pts · ⏱ ${mmss(left)}`;
+  if (t !== itTxt) { itTxt = t; itEl.textContent = t; itEl.className = me && NET.state === 'play' ? 'me' : ''; }
 }
-// the end of a round: last one caught first
-function showResults(res, next) {
+// the end of a round: points, best first
+function showResults(res, next, hiders, match) {
   NET.next = performance.now() + next;
-  resEl.innerHTML = `<h2>Round ${NET.n || 1} over!</h2>` + res.map(([id, n, s, k], r) =>
-    `<p class="${r === 0 ? 'win' : ''}${id === NET.id ? ' me' : ''}"><span>${r === 0 ? '🏆' : `${r + 1}.`}</span><span>${esc(id === NET.id ? 'You' : n)}</span><span>${r === res.length - 1 && s === 0 ? 'first hunter' : `free for ${s} s`}</span><span>${k} caught</span></p>`).join('') +
-    `<p class=nx>The last one caught wins · next round in <i>${Math.ceil(next / 1000)}</i> s</p>`;
+  const best = [...res].sort((a, b) => b[3] - a[3])[0];
+  resEl.innerHTML = `<h2>Round ${NET.rim} of 3: ${hiders ? 'the hiders win! 🫥' : 'the hunters win! 🔴'}</h2>` +
+    `<p class=hd><span></span><span></span><span>Points</span><span>⭐</span><span>Caught</span><span>Match</span></p>` + res.map(([id, n, pt, tot, pe, ca, fr], r) =>
+    `<p class="${r === 0 ? 'win' : ''}${id === NET.id ? ' me' : ''}"><span>${r === 0 ? '🏆' : `${r + 1}.`}</span><span>${esc(id === NET.id ? 'You' : n)}${fr ? ` <small>free ${fr} s</small>` : ''}</span><span>${pt}</span><span>${pe}</span><span>${ca}</span><span>${tot}</span></p>`).join('') +
+    (match ? `<p class=nx>🏆 Match winner: <b>${esc(best[0] === NET.id ? 'You' : best[1])}</b> with ${best[3]} points! A new match starts in <i>${Math.ceil(next / 1000)}</i> s</p>`
+      : `<p class=nx>Next round in <i>${Math.ceil(next / 1000)}</i> s</p>`);
   resEl.className = 'v';
 }
 // move into podGAN i (snap: put the camera there at once, otherwise it flies over)
@@ -766,8 +791,9 @@ function netMsg(m) {
         for (const p of m.players) if (p.id !== m.id) addP(p);
         const mine = m.players.find((p) => p.id === m.id); if (mine.it) NET.its.add(m.id);
         PL.pod = -1; become(mine.pod, true);
-        NET.state = m.state; NET.n = m.n; NET.t0 = performance.now();
-        if (m.state === 'over' && m.res) showResults(m.res, 8000);
+        NET.state = m.state; NET.n = m.n; NET.rim = m.rim || 1; NET.t0 = performance.now(); NET.rs = NET.t0 - (m.el || 0); NET.len = m.len || NET.len;
+        NET.pearls = m.pearls || []; NET.pts.clear(); NET.tot.clear(); for (const p of m.players) NET.tot.set(p.id, p.total || 0);
+        if (m.state === 'over' && m.res) showResults(m.res, 8000, true, false);
       }
       netName(); countMsg(); drawIt();
       break;
@@ -780,18 +806,40 @@ function netMsg(m) {
     case 'round': {
       seen.clear(); heard.clear();
       if (!m.local && NET.solo) soloStop();
-      NET.state = 'play'; NET.n = m.n; NET.t0 = performance.now(); resEl.className = '';
-      NET.its = new Set([m.it]); NET.at.clear(); NET.tags.clear();
+      NET.state = 'play'; NET.n = m.n; NET.rim = m.rim; NET.t0 = NET.rs = performance.now(); NET.len = m.len; resEl.className = '';
+      NET.its = new Set(m.its); NET.at.clear(); NET.tags.clear(); NET.pts.clear(); NET.pearls = m.pearls; PL.took.clear(); PL.stun = 0;
+      if (m.rim === 1) NET.tot.clear();
       for (const p of P.values()) if (own[p.pod] === p.id) own[p.pod] = -1;
       for (const [id, pod] of m.pods) {
         if (id === NET.id) become(pod, true);
         else { const p = P.get(id); if (p) { p.pod = pod; p.tp = null; own[pod] = id; } }
       }
-      feed(`Round ${m.n}: ${m.it === NET.id ? 'you are' : `${pname(m.it)} is`} IT!`);
-      if (m.it === NET.id) flash();
+      if (isIt(NET.id)) { feed(`Round ${m.rim} of 3: you're a HUNTER 🔴 Hiders look like wild podGANs: watch how they swim`); flash(); }
+      else feed(`Round ${m.rim} of 3: you're a HIDER 🫥 Blend in, grab pearls ⭐ The hunters glow red`);
       drawIt();
       break;
     }
+    case 'miss': { // a hunter guessed wrong: stunned, and the podGAN squeals
+      const ps = m.id === NET.id ? PL.pod : P.get(m.id)?.pod ?? -1;
+      if (m.id === NET.id) { PL.stun = performance.now() + m.until; flash(); feed('Wrong podGAN! 😵 Just a wild one. Stunned for 3 s'); }
+      else feed(`${pname(m.id)} grabbed the wrong podGAN! 😵`);
+      const d = PL.pod >= 0 ? dist(PL.pod, m.i) : 99;
+      if (d < 70) sfx(2600, 900, 0.4, 0.08 + 0.25 * (1 - d / 70), 'triangle');
+      if (m.local && ps >= 0) { const b = NET.solo?.bots.get(m.id); if (b) b.stun = F[TIME] + m.until / 1000; }
+      break;
+    }
+    case 'pearl': {
+      NET.pearls[m.k] = m.pod; addPts(m.by, 10);
+      if (m.by === NET.id) { feed('⭐ Pearl! +10'); sfx(1200, 2400, 0.25, 0.2); }
+      break;
+    }
+    case 'bonus': addPts(m.id, m.pts); if (m.id === NET.id) { feed(`🖤 An inkfish! Ink refilled · +${m.pts}`); PL.inkT = -1e9; sfx(600, 1800, 0.5, 0.25); } break;
+    case 'bwong': // a hunter's sonar: everyone hears it, and the hiders see which way it came from
+      if (m.id === NET.id) break;
+      heard.set(m.id, F[TIME]);
+      { const d = PL.pod >= 0 ? dist(PL.pod, m.i) : 99; sfx(220, 110, 1.4, 0.15 + 0.25 * max(0, 1 - d / 120), 'sine'); }
+      if (!isIt(NET.id)) feed(`📡 BWONG! ${pname(m.id)} pinged (follow the arrow)`);
+      break;
     case 'own': // someone moved into a wild podGAN
       if (m.id === NET.id) { become(m.i, false); feed(`You are now a ${SW.g[m.i].name}`); }
       else { const p = P.get(m.id); if (p) { if (own[m.from] === m.id) own[m.from] = -1; p.pod = m.i; p.tp = null; own[m.i] = m.id; } }
@@ -816,23 +864,25 @@ function netMsg(m) {
       else if (m.by === NET.id) feed(`${pname(m.v)} got away!`);
       else feed(`${pname(m.v)} escaped ${pname(m.by)}`);
       break;
-    case 'catch': { // m.by jumped into m.v's podGAN m.i; it split and m.v swims off in m.vi, IT now too
+    case 'catch': { // m.by jumped into m.v's podGAN m.i; it split and m.v swims off in m.vi, a hunter now too
       if (m.v === NET.id) warnOff();
-      NET.its.add(m.v); NET.at.set(m.v, now); NET.tags.set(m.by, (NET.tags.get(m.by) || 0) + 1);
+      NET.its.add(m.v); NET.at.set(m.v, now); NET.tags.set(m.by, (NET.tags.get(m.by) || 0) + 1); addPts(m.by, 25);
       const pb = P.get(m.by), pv = P.get(m.v);
       if (own[m.from] === m.by) own[m.from] = -1;
       own[m.i] = -1; split(m.i, m.vi);
       if (m.by === NET.id) become(m.i, false); else if (pb) { pb.pod = m.i; pb.tp = null; own[m.i] = m.by; }
       if (m.v === NET.id) become(m.vi, false); else if (pv) { pv.pod = m.vi; pv.tp = null; own[m.vi] = m.v; }
-      const left = m.left ? ` · ${m.left} still free` : '';
-      if (m.by === NET.id) feed(`You caught ${pname(m.v)}! Split! They hunt with you now${left}`);
-      else if (m.v === NET.id) { feed(`${pname(m.by)} caught you! You split off. Now you're IT${left}`); flash(); }
+      const left = m.left ? ` · ${m.left} still hiding` : '';
+      if (m.by === NET.id) feed(`You caught ${pname(m.v)}! +25 · They hunt with you now${left}`);
+      else if (m.v === NET.id) { feed(`${pname(m.by)} found you! Now you hunt 🔴${left}`); flash(); }
       else feed(`${pname(m.by)} caught ${pname(m.v)}${left}`);
       drawIt();
       break;
     }
-    case 'it': NET.its.add(m.id); if (m.id === NET.id) { feed("You're IT now!"); flash(); } drawIt(); break;
-    case 'over': NET.state = 'over'; NET.res = m.res; showResults(m.res, m.next); feed(m.res[0][0] === NET.id ? 'You won the round! 🏆' : `${pname(m.res[0][0])} wins the round!`); drawIt(); break;
+    case 'it': NET.its.add(m.id); if (m.id === NET.id) { feed("You're a hunter now! 🔴"); flash(); } drawIt(); break;
+    case 'over':
+      NET.state = 'over'; NET.res = m.res; for (const r of m.res) NET.tot.set(r[0], r[3]); NET.pts.clear();
+      showResults(m.res, m.next, m.hiders, m.match); feed(m.hiders ? 'Time! The hiders win 🫥' : 'Everyone found! The hunters win 🔴'); drawIt(); break;
     case 's': { const p = P.get(m.id); if (!p || m.i !== p.pod) break; p.tp = m; break; }
     case 'ink': addInk(m.p[0], m.p[1], m.p[2]); break;
     case 'no': feed(m.why); break;
@@ -868,7 +918,7 @@ function soloStart() {
   BOTS.forEach((name, k) => {
     const id = 20 + k, p = game.add(id, name);
     NET.players.set(id, { id, name, pod: p.pod, tp: null, bot: true });
-    NET.solo.bots.set(id, { lock: 0, need: 1, hop: 2 + Math.random() * 4, ink: 10 + Math.random() * 40, wt: 0, wd: [1, 0, 0] });
+    NET.solo.bots.set(id, { lock: 0, need: 1, hop: 2 + Math.random() * 4, ink: 10 + Math.random() * 40, burst: 0, on: false, pt: 0, pk: null, ping: 4 + Math.random() * 8, guess: 15 + Math.random() * 15, stun: 0, mark: null, mt: 0 });
   });
   game.newRound();
   if (NET.online) countMsg();
@@ -923,13 +973,11 @@ function aimAt() {
 function jump() {
   const i = PL.tgt;
   if (i < 0 || F[TIME] - PL.jumpT < 0.4) return;
+  if (performance.now() < PL.stun) { feed("You're stunned!"); return; }
   PL.jumpT = F[TIME];
   const o = SW.own[i];
-  if (o >= 0 && o !== NET.id) {
-    if (NET.state !== 'play') { feed('Wait for the next round to start'); return; }
-    if (!isIt(NET.id)) { feed('Only IT can jump into another player'); return; }
-    if (isIt(o)) { feed(`${pname(o)} is already IT`); return; }
-  }
+  // a hider can't hop into another player; a hunter's jump into anything but a hunter is a guess (no hints here)
+  if (o >= 0 && o !== NET.id && (!isIt(NET.id) || isIt(o))) { feed(isIt(o) ? `${pname(o)} is a hunter` : 'Someone is already in there'); return; }
   if (NET.solo) { const why = NET.solo.game.jump(NET.id, i); if (why) feed(why); }
   else netSend({ t: 'jump', i });
 }
@@ -939,14 +987,15 @@ function ping() {
   const wait = PING_GAP - (F[TIME] - PL.pingT);
   if (wait > 0) { feed(`Sonar recharging · ${Math.ceil(wait)} s`); return; }
   PL.pingT = F[TIME];
-  const j = PL.pod * 3; let n = 0, nf = 0;
-  for (const [id, p] of NET.players) {
-    if (id === NET.id || SW.own[p.pod] !== id) continue;
-    const k = p.pod * 3;
-    heard.set(id, F[TIME]);
-    if (hypot(SW.P[k] - SW.P[j], SW.P[k + 1] - SW.P[j + 1], SW.P[k + 2] - SW.P[j + 2]) < PING_R) { seen.set(id, F[TIME]); n++; } else nf++;
+  if (NET.solo) NET.solo.game.ping(NET.id); else netSend({ t: 'ping' });
+  let n = 0;
+  if (isIt(NET.id) && NET.state === 'play') { // hunters: hiders close by show through everything (and everyone heard you)
+    for (const [id, p] of NET.players) if (SW.own[p.pod] === id && !isIt(id) && dist(PL.pod, p.pod) < PING_R) { seen.set(id, F[TIME]); n++; }
+    feed(`📡 BWONG! ${n ? `${n} hider${n > 1 ? 's' : ''} close by!` : 'No hiders within 60 m'} (everyone heard that)`);
+  } else { // hiders: arrows to every hunter
+    for (const [id, p] of NET.players) if (SW.own[p.pod] === id && isIt(id)) { heard.set(id, F[TIME]); n++; }
+    feed(`📡 Sonar: ${n} hunter${n === 1 ? '' : 's'} (follow the red arrows)`);
   }
-  feed(`📡 Sonar: ${n || 'nobody'} nearby${nf ? ` · ${nf} far away (follow the arrows)` : ''}`);
   const r = document.createElement('i'); r.className = 'ping'; document.body.append(r); setTimeout(() => r.remove(), 1300);
   sfx(1500, 700, 1.2, .25);
 }
@@ -1029,13 +1078,17 @@ function pilot(dt) {
   let vx = V[j], vy = V[j + 1], vz = V[j + 2];
   // your podGAN drifts with the swarm like any other (swim() moves it). Squirting ink fires its jets flat out for
   // a moment: a fast escape the way you're looking
-  if (PL.boost > 0) jetOut(i, fx, fy, fz, dt, (PL.boost -= dt));
+  const stunned = performance.now() < PL.stun;
+  if (stunned) { PL.boost = 0; PL.pt = -1; cn[i] = 0.5 + 0.5 * sin(F[TIME] * 30); } // dizzy: no jets
+  else if (PL.boost > 0) jetOut(i, fx, fy, fz, dt, (PL.boost -= dt));
   else {
     // left-click jets: a tap draws in for 0.18 s then kicks once; held, full jets pulsing the way you look
     PL.hold = PL.jetDown ? PL.hold + dt : 0;
     if (PL.pt >= 0) {
       PL.pt += dt;
-      if (PL.pt >= 0.18 && !PL.kicked) { PL.kicked = true; V[j] += fx * 4.5; V[j + 1] += fy * 4.5; V[j + 2] += fz * 4.5; }
+      // squidders kick harder, krakens softer
+      const kk = { Squidder: 6, Squid: 4.8, Octopod: 4.2, Kraken: 3.6 }[SW.g[i].name.split(' ')[1]] || 4.5;
+      if (PL.pt >= 0.18 && !PL.kicked) { PL.kicked = true; V[j] += fx * kk; V[j + 1] += fy * kk; V[j + 2] += fz * kk; }
       cn[i] = PL.pt < 0.18 ? PL.pt / 0.18 : max(0, 1 - (PL.pt - 0.18) / 0.17);
       if (PL.pt > 0.35) PL.pt = -1;
     }
@@ -1051,11 +1104,41 @@ function pilot(dt) {
   PL.tgt = aimAt();
   // what's in the middle of the view
   if (PL.tgt >= 0) {
-    const o = SW.own[PL.tgt], pl = o >= 0 && o !== NET.id ? NET.players.get(o) : null;
-    tagEl.textContent = pl ? `${isIt(o) ? `${pl.name} · IT` : 'a free podGAN'} · ${isIt(NET.id) && !isIt(o) && NET.state === 'play' ? 'click to catch!' : 'a player'}` : `${podName(PL.tgt)} · click to jump in`;
-    tagEl.className = 'v' + (pl ? ' pl' : '');
+    // only hunters (and, for a hider, fellow hiders) are told apart: anything else reads like a wild podGAN
+    const o = SW.own[PL.tgt], pl = o >= 0 && o !== NET.id ? NET.players.get(o) : null, meIt = isIt(NET.id) && NET.state === 'play';
+    const shown = pl && (isIt(o) || !meIt);
+    tagEl.textContent = shown ? `${pl.name} · ${isIt(o) ? 'hunter 🔴' : 'hider (on your side)'}` : `${podName(PL.tgt)} · ${meIt ? 'click to guess!' : 'click to hop in'}`;
+    tagEl.className = 'v' + (shown ? ' pl' : '');
   } else tagEl.className = '';
   $('x').className = PL.tgt >= 0 ? 'on' : '';
+  // pearls: a hider swimming through one takes it (krakens reach further)
+  if (NET.state === 'play' && !isIt(NET.id)) {
+    const k = takePearl(i);
+    if (k >= 0) { PL.took.set(k, F[TIME]); if (NET.solo) NET.solo.game.pearl(NET.id, k); else netSend({ t: 'pearl', k }); }
+  }
+}
+// where pearl k is: just above the home of the podGAN it sits at
+const pearlAt = (k) => { const j = NET.pearls[k] * 3; return [SW.home[j], SW.home[j + 1] + 1, SW.home[j + 2]]; };
+// the pearl podGAN i is touching (not one it has just taken and is waiting to hear about), or -1
+function takePearl(i, mine = true) {
+  const j = i * 3, s = SW.g[i].size, r = SW.g[i].name.endsWith('Kraken') ? 4.5 : 2.6;
+  const x = SW.P[j] + SW.U[j] * s * 8, y = SW.P[j + 1] + SW.U[j + 1] * s * 8, z = SW.P[j + 2] + SW.U[j + 2] * s * 8;
+  for (let k = 0; k < NET.pearls.length; k++) {
+    if (mine && F[TIME] - (PL.took.get(k) ?? -9) < 1) continue;
+    const [px, py, pz] = pearlAt(k);
+    if ((px - x) ** 2 + (py - y) ** 2 + (pz - z) ** 2 < r * r) return k;
+  }
+  return -1;
+}
+// the pearls for drawing: pearly white with a rainbow sheen
+function packPearls() {
+  let n = 0;
+  if (NET.state === 'play') for (let k = 0; k < NET.pearls.length && n < 32; k++) {
+    const [x, y, z] = pearlAt(k), h = (k * 0.137 + F[TIME] * 0.05) % 1;
+    prBuf.set([x, y, z, 0.35, 1.1 + 0.4 * cos(h * 6.283), 1.1 + 0.4 * cos((h - 0.33) * 6.283), 1.1 + 0.4 * cos((h - 0.67) * 6.283), k * 1.7], n * 8); n++;
+  }
+  nPearl = n;
+  if (n) Q.writeBuffer(ibPearl, 0, prBuf, 0, n * 8);
 }
 // --- the bots: hunt the nearest free podGAN when IT, otherwise flee the nearest hunter, body-hop and ink to escape
 const dist = (a, b) => hypot(SW.P[a * 3] - SW.P[b * 3], SW.P[a * 3 + 1] - SW.P[b * 3 + 1], SW.P[a * 3 + 2] - SW.P[b * 3 + 2]);
@@ -1069,36 +1152,81 @@ function wildNear(i, fn) {
   }
   return best;
 }
+// a bot jets podGAN i along (dx, dy, dz) at a m/s²
+function botJet(i, dx, dy, dz, a, dt) {
+  const { V, H, cn } = SW, j = i * 3, l = hypot(dx, dy, dz) || 1, k = a * dt / l;
+  V[j] += dx * k; V[j + 1] += dy * k; V[j + 2] += dz * k;
+  H[j] = dx / l; H[j + 1] = dy / l * 0.6; H[j + 2] = dz / l;
+  cn[i] = 0.5 + 0.5 * sin(F[TIME] * 16 + i);
+}
+const pearlDist = (i, k) => { const [x, y, z] = pearlAt(k), j = i * 3; return hypot(SW.P[j] - x, SW.P[j + 1] - y, SW.P[j + 2] - z); };
+// Hiders go pearl hunting in bursts of jets, and flee (hop, ink) when a hunter comes close. Hunters ping now and
+// then, chase whoever their sonar found (or who swam suspiciously fast nearby, or flickered), and guess; now and
+// then they guess wrong.
 function bots(dt) {
   const S = NET.solo; if (!S) return;
   S.game.tick();
-  const { P } = SW, play = NET.state === 'play';
+  const { P, V } = SW, play = NET.state === 'play';
   const who = allIds().map((id) => [id, id === NET.id ? PL.pod : NET.players.get(id)?.pod ?? -1]).filter(([, pod]) => pod >= 0);
+  const flick = flickering();
   for (const [id, b] of S.bots) {
     const p = NET.players.get(id); if (!p || SW.own[p.pod] !== id) continue;
     const i = p.pod, j = i * 3;
-    b.hop -= dt; b.ink -= dt; b.wt -= dt;
+    b.hop -= dt; b.ink -= dt; b.burst -= dt; b.pt -= dt; b.ping -= dt; b.guess -= dt;
     if (b.boost > 0) { jetOut(i, ...b.bd, dt, (b.boost -= dt)); continue; } // inked: jets flat out, straight away
-    let dx = 0, dy = 0, dz = 0;
-    if (play && isIt(id)) {
-      // hunt the nearest free podGAN; close enough for a moment, and it jumps in (and sometimes misses)
-      let tq = -1, ti = -1, td = 1e9;
-      for (const [q, qi] of who) if (!isIt(q)) { const d = dist(i, qi); if (d < td) { td = d; ti = qi; tq = q; } }
-      if (ti >= 0) {
-        if (td < 13) { b.lock += dt; if (b.lock > b.need) { if (Math.random() < 0.7) S.game.jump(id, ti); b.lock = 0; b.need = 0.6 + Math.random() * 1.4; } }
-        else b.lock = max(0, b.lock - dt);
-        // far away: body-hop into a wild podGAN close to the target
-        if (td > 13 && b.hop <= 0) { const c = wildNear(i, (c) => -dist(c, ti)); if (c >= 0 && dist(c, ti) < td - 12) S.game.jump(id, c); b.hop = 1.5 + Math.random() * 2.5; }
+    if (!play || F[TIME] < b.stun) continue;
+    if (isIt(id)) {
+      // sonar every 14-24 s: hiders close by are marked for a while
+      if (b.ping <= 0 && S.game.ping(id)) {
+        b.ping = 14 + Math.random() * 10;
+        for (const [q, qi] of who) if (!isIt(q) && dist(i, qi) < PING_R) { b.mark = q; b.mt = F[TIME] + 7; }
       }
-    } else if (play) {
-      // run from the nearest hunter, hop away when it gets close, ink when it's right there
+      // ...and so are hiders seen jetting close by, or flickering
+      for (const [q, qi] of who) {
+        if (isIt(q)) continue;
+        const d = dist(i, qi), k = qi * 3;
+        if ((d < 22 && hypot(V[k], V[k + 1], V[k + 2]) > 3.5) || (flick && d < 70)) { if (b.mark !== q || d < 22) { b.mark = q; b.mt = F[TIME] + 6; } }
+      }
+      const mp = b.mark != null && F[TIME] < b.mt ? (b.mark === NET.id ? PL.pod : NET.players.get(b.mark)?.pod ?? -1) : -1;
+      if (mp >= 0 && !isIt(b.mark)) {
+        const d = dist(i, mp), k = mp * 3;
+        botJet(i, P[k] - P[j], P[k + 1] - P[j + 1], P[k + 2] - P[j + 2], d > 14 ? 10 : 4, dt);
+        if (d < 12) { b.lock += dt; if (b.lock > b.need) {
+          b.lock = 0; b.need = 0.5 + Math.random() * 1.2;
+          // usually right; sometimes it grabs a wild one next to them instead
+          if (Math.random() < 0.75) S.game.jump(id, mp); else { const c = wildNear(i, (c) => -dist(c, mp)); if (c >= 0) S.game.jump(id, c); }
+        } }
+      } else {
+        b.mark = null;
+        // nobody marked: lurk around the pearls in bursts, and now and then take a wild guess at something close
+        if (b.pt <= 0 || b.pk == null || b.pk >= NET.pearls.length) { b.pk = floor(Math.random() * NET.pearls.length); b.pt = 6 + Math.random() * 6; }
+        if (b.burst <= 0) b.burst = b.on ? 1.5 + Math.random() * 2 : 1 + Math.random() * 1.5, b.on = !b.on;
+        if (b.on && b.pk != null) { const [x, y, z] = pearlAt(b.pk); botJet(i, x - P[j], y - P[j + 1], z - P[j + 2], 7, dt); }
+        if (b.guess <= 0) { b.guess = 18 + Math.random() * 15; const c = wildNear(i, (c, d) => -d); if (c >= 0 && dist(i, c) < 12) S.game.jump(id, c); }
+      }
+    } else {
+      // hider: flee a hunter that's close, else go for pearls
       let hi = -1, hd = 1e9;
       for (const [q, qi] of who) if (isIt(q)) { const d = dist(i, qi); if (d < hd) { hd = d; hi = qi; } }
-      if (hi >= 0 && hd < 30) {
-        const k = hi * 3; dx = P[j] - P[k]; dy = (P[j + 1] - P[k + 1]) * 0.5; dz = P[j + 2] - P[k + 2];
-        if (hd < 20 && b.hop <= 0) { const c = wildNear(i, (c) => dist(c, hi)); if (c >= 0 && dist(c, hi) > hd + 8) S.game.jump(id, c); b.hop = 4 + Math.random() * 5; }
-        if (hd < 9 && b.ink <= 0) botInk(id, b, i, dx, dy, dz);
+      if (hi >= 0 && hd < 25) {
+        const k = hi * 3, dx = P[j] - P[k], dy = (P[j + 1] - P[k + 1]) * 0.5, dz = P[j + 2] - P[k + 2];
+        if (hd < 9 && b.ink <= 0) { botInk(id, b, i, dx, dy, dz); continue; }
+        if (hd < 18 && b.hop <= 0) { const c = wildNear(i, (c) => dist(c, hi)); if (c >= 0 && dist(c, hi) > hd + 8) S.game.jump(id, c); b.hop = 3 + Math.random() * 4; continue; }
+        if (hd > 12) continue; // keep still and blend in, mostly
+        botJet(i, dx, dy, dz, 6, dt);
+        continue;
       }
+      if (b.pt <= 0 || b.pk == null || b.pk >= NET.pearls.length) {
+        let bk = -1, bd = 1e9; for (let k = 0; k < NET.pearls.length; k++) { const d = pearlDist(i, k) + Math.random() * 15; if (d < bd) { bd = d; bk = k; } }
+        b.pk = bk; b.pt = 4 + Math.random() * 4;
+      }
+      if (b.pk < 0) continue;
+      const pd = pearlDist(i, b.pk);
+      if (pd > 45 && b.hop <= 0) { const c = wildNear(i, (c) => -pearlDist(c, b.pk)); if (c >= 0 && pearlDist(c, b.pk) < pd - 15) S.game.jump(id, c); b.hop = 2 + Math.random() * 3; continue; }
+      if (b.burst <= 0) b.burst = b.on ? 1 + Math.random() * 2 : 1.5 + Math.random() * 3, b.on = !b.on;
+      if (b.on || pd < 6) { const [x, y, z] = pearlAt(b.pk); botJet(i, x - P[j], y - P[j + 1], z - P[j + 2], pd < 6 ? 4 : 8, dt); }
+      const k = takePearl(i, false);
+      if (k >= 0) { S.game.pearl(id, k); b.pt = 0; }
     }
   }
 }
@@ -1121,6 +1249,7 @@ function game(dt) {
   hunterBeep(dt);
   if (resEl.className) { const e = resEl.querySelector('i'); if (e) e.textContent = max(0, Math.ceil((NET.next - performance.now()) / 1000)); }
   if ($('sb').className) drawScores();
+  drawIt();
   if (!NET.online) return;
   if ((NET.sendT -= dt) <= 0 && PL.pod >= 0) {
     NET.sendT = 1 / 15;

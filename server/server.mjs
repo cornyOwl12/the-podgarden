@@ -1,12 +1,12 @@
-// The podGARDEN multiplayer server: podGAN tag
+// The podGARDEN multiplayer server: Body Snatchers
 //   npm install && npm start          (PORT=8080 by default)
 // Serves ../index.html at / and runs the game at /ws for up to 8 players. Every player is a podGAN: one of the
-// 1024 in the swarm (numbered 0-1023). The rules (who is IT, catching, rounds, scores) are in
-// ../source/src/tag.js, the same file the browser uses for solo games against bots:
-//   - one player starts as IT; jumping into another player's podGAN catches them: they become IT too, and the
-//     podGAN splits in two, one for each of you
-//   - when everyone is IT the round is over and the last one caught wins; 8 s later a new round starts
-//   - jumping into a wild podGAN is always allowed; ink once a minute
+// 1024 in the swarm (numbered 0-1023). The rules are in ../source/src/tag.js, the same file the browser uses for
+// solo games against bots:
+//   - two hunters (glowing red) look for the hiders, who look exactly like wild podGANs
+//   - hiders collect pearls and hop between wild podGANs; a hunter's jump is a guess: a hider is caught and hunts
+//     too, a wild one leaves the hunter stunned
+//   - 4-minute rounds, three to a match; points for pearls, surviving and catches
 // Positions, ink and the wild swarm are relayed between browsers: the lowest-numbered player "hosts" the swarm,
 // sending everyone corrections twice a second.
 import { createServer } from 'node:http';
@@ -50,7 +50,7 @@ wss.on('connection', (ws) => {
   if (id >= MAXP) { send(ws, { t: 'full' }); ws.close(); return; }
   socks.set(id, ws);
   const p = game.add(id, `podGAN ${id + 1}`);
-  send(ws, { t: 'hi', id, host: host < 0 ? id : Math.min(host, id), state: game.state, n: game.n, start: game.start, res: game.res, players: [...game.players.values()].map(game.pub) });
+  send(ws, { t: 'hi', id, host: host < 0 ? id : Math.min(host, id), state: game.state, n: game.n, rim: game.rim, el: game.elapsed(), len: game.LEN, pearls: game.pearls, res: game.res, players: [...game.players.values()].map(game.pub) });
   all({ t: 'join', p: game.pub(p) }, id);
   pickHost();
   if (game.state === 'wait' && game.players.size < 2) send(ws, { t: 'wait' });
@@ -65,6 +65,8 @@ wss.on('connection', (ws) => {
       case 's': m.id = id; m.i = p.pod; all(m, id); break; // the state of this player's body, relayed
       case 'ink': if (game.ink(id)) all({ t: 'ink', id, p: m.p }, id); break;
       case 'jump': { const why = game.jump(id, m.i | 0); if (why) send(ws, { t: 'no', why }); break; }
+      case 'pearl': game.pearl(id, m.k | 0); break;
+      case 'ping': game.ping(id); break;
     }
   });
   ws.on('close', () => {

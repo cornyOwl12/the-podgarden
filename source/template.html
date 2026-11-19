@@ -140,7 +140,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 #sb { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); min-width: 28em; padding: 1em 1.4em; border-radius: .7em; background: #03131ce6;
   font: .95em/1.9 ui-monospace, Consolas, monospace; color: #e8fbff; display: none; pointer-events: none; }
 #sb.v { display: block; }
-#sb p { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 1em; }
+#sb p { display: grid; grid-template-columns: 2fr 1.4fr .7fr .7fr; gap: 1em; }
 #sb p.it { color: #ff6b6b; }
 #sb b { color: #7ff3ff; font-weight: 400; }
 #ink { position: absolute; left: 1.2em; bottom: 1.2em; font: .9em ui-monospace, Consolas, monospace; color: #e8fbff99; text-shadow: 0 1px 4px #000; }
@@ -161,9 +161,12 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
   box-shadow: 0 0 0 2px #ffd75e80, 0 0 3em #000c; font: .95em/2 ui-monospace, Consolas, monospace; color: #e8fbff; display: none; pointer-events: none; text-align: left; }
 #res.v { display: block; }
 #res h2 { margin: 0 0 .4em; text-align: center; font: 900 1.6em system-ui, sans-serif; letter-spacing: .06em; color: #ffd75e; text-transform: uppercase; }
-#res p { display: grid; grid-template-columns: 2em 2fr 1.4fr 1fr; gap: .8em; }
+#res p { display: grid; grid-template-columns: 2em 3fr 1fr 1fr 1fr 1fr; gap: .8em; align-items: baseline; }
+#res p.hd { color: #7ff3ff; font-size: .8em; }
+#res small { opacity: .6; font-size: .75em; }
 #res p.win { color: #ffd75e; font-size: 1.15em; }
 #res p.me span:nth-child(2) { text-decoration: underline; text-underline-offset: .25em; }
+#bs { max-width: 34em; margin: .6em auto 0; font-size: .85em; line-height: 1.4; opacity: .85; }
 #res p.nx { display: block; margin-top: .6em; text-align: center; color: #7ff3ff; font-size: .9em; }
 #nm { padding: .8em 1em; border: 0; border-radius: .5em; background: #03131cd9; box-shadow: inset 0 0 0 2px #7ff3ff80; color: #e8fbff;
   font: 700 1em system-ui, sans-serif; letter-spacing: .06em; text-align: center; outline: none; }
@@ -185,9 +188,9 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
       <div id=k>
         <p>
           <i><b>Mouse</b></i>Aim
-          <i><b>Left click</b></i>Jump into a podGAN · catch a player
+          <i><b>Left click</b></i>Hop into a podGAN · hunters: guess who's a player
           <i><b>Left click</b> open water</i>Jet · hold for full jets
-          <i><b>F</b> / <b>middle click</b></i>Sonar ping: shows players nearby (every 5 s)
+          <i><b>F</b> / <b>middle click</b></i>Sonar ping (every 6 s)
           <i><b>Right click</b></i>Squirt ink + jet away fast (once a minute)
         </p>
         <p>
@@ -197,6 +200,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
           <i><b>H</b></i>Stats
         </p>
       </div>
+      <p id=bs><b>Body Snatchers:</b> players look exactly like wild podGANs. Hiders 🫥 blend in and swim through pearls ⭐ for points. Hunters 🔴 glow red and must guess who's a player: guess right and they hunt with you, guess wrong and you're stunned. Hiders flicker every 30 s · 4-minute rounds, 3 per match.</p>
       <p id=h>Hold to jet · slide to aim</p>
     </div>
   </div>

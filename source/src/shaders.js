@@ -1202,6 +1202,28 @@ fn near(c: vec3f, G: Gn, lc: vec3f, cn: f32) -> bool {
 // Screen-space voxelisation. Each pixel walks a grid of g.mis.w-metre cells (0 turns it off) along its view ray,
 // starting just in front of the nearest surface around it. A cell is solid when the depth buffer puts a surface
 // near its centre, and takes the colour seen at its centre, so each cube is one flat colour with shaded faces.
+// ---------------------------------------------------------------- pearls (Body Snatchers): glowing orbs that face the camera
+// instance a = centre + radius, b = rgb + phase. Never smaller than a few pixels, so they can be spotted far off.
+const W_PEARL = S_B + /*wgsl*/`
+struct PO { @builtin(position) cp: vec4f, @location(0) uv: vec2f, @location(1) col: vec3f };
+@vertex fn vs(@builtin(vertex_index) vi: u32, @location(0) a: vec4f, @location(1) b: vec4f) -> PO {
+  var o: PO; let q = vec2f(f32(vi & 1u), f32(vi >> 1u)) * 2. - 1.; let t = g.cam.w;
+  let p = a.xyz + vec3f(0., .25 * sin(t * 1.7 + b.w), 0.);
+  let d = length(p - g.cam.xyz);
+  let sz = max(a.w * 3., d * .02);
+  o.cp = g.vp * vec4f(p + (g.right.xyz * q.x + g.up.xyz * q.y) * sz, 1.);
+  o.uv = q * 3.;
+  o.col = b.rgb * (.75 + .35 * sin(t * 3. + b.w)) * (1. + min(d * .015, 1.5));
+  return o;
+}
+@fragment fn fs(i: PO) -> @location(0) vec4f {
+  let r = length(i.uv);
+  let core = 1. - smoothstep(.6, .85, r);
+  let glow = exp(-r * r * .6) * .7;
+  if (core + glow < .02) { discard; }
+  return vec4f(i.col * (core * 2.2 + glow), -100.);
+}`;
+
 const W_VOX = S_G + W_FS + /*wgsl*/`
 @group(0) @binding(0) var<uniform> g: G;
 @group(0) @binding(1) var tS: texture_2d<f32>;
