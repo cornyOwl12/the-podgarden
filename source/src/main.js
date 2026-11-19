@@ -683,7 +683,7 @@ function packSwarm() {
 
 // ============================================================================ the game: podGAN Photo Lap
 // You are a podGAN: one of the swarm, seeing through its eyes. It rides the same route round the garden every lap while you look around, and on the way you take
-// 3 photos (left-click). Each podGAN in a photo scores by how rare it is
+// as many photos as you like (left-click); your 3 best score. Each podGAN in a photo scores by how rare it is
 // (rainbows are everywhere, inkfish are 1 in 128, krakens are worth more), plus a crowd bonus for lots in one
 // shot and a bonus for every matching pair. Your lap score is your three photos.
 // Opened from the podGARDEN server (server/server.mjs), friends swim in the same ocean and the best laps go on a
@@ -692,7 +692,7 @@ const NET = { ws: null, id: 0, host: true, online: false, players: new Map(), se
 const PL = { pod: -1, pt: -1, kicked: false, hold: 0, cx: 0, cy: -30, cz: 0, snap: true, jetDown: false };
 const LAP = { on: false, t0: 0, d: 0, shots: [], left: 3, next: 0, best: 0, flash: 0, pend: null };
 try { LAP.best = +localStorage.podLapBest || 0; } catch {}
-const SHOTS = 3, SHOT_R = 40, FRAME = 0.8; // the photo frame is the middle 80% of the view
+const SHOT_R = 40, FRAME = 0.8; // the photo frame is the middle 80% of the view
 const inks = []; // (the voxel pass still reads ink clouds; none in this game)
 const feedEl = $('feed'), nsEl = $('ns'), nmEl = $('nm'), tagEl = $('n'), itEl = $('itb'), lblEl = $('lbl'), inkEl = $('ink'), resEl = $('res');
 const vfEl = $('vf'), phEl = $('ph'), flEl = $('fl');
@@ -847,27 +847,28 @@ function scoreShot(list) {
   const rare = list.filter((i) => SW.g[i].name.startsWith('Inkfish')).length;
   return { n, base, crowd, pairs, pair, rare, total: base + crowd + pair, counts };
 }
-// left-click: snap! (the picture itself is grabbed straight after this frame is drawn)
+// left-click: snap! As many as you like (the picture itself is grabbed straight after this frame is drawn)
 function photo() {
   if (!LAP.on) return;
-  if (LAP.left <= 0) { feed('No photos left this lap: enjoy the ride!'); return; }
   const sc = scoreShot(inShot(true));
-  LAP.left--; LAP.shots.push(sc); LAP.pend = sc; LAP.flash = 1;
+  sc.k = LAP.shots.length + 1; LAP.shots.push(sc); LAP.pend = sc; LAP.flash = 1;
   sfx(3000, 1500, 0.08, 0.3, 'square'); setTimeout(() => sfx(900, 700, 0.12, 0.2, 'triangle'), 60);
   feed(`📸 ${sc.n} podGAN${sc.n === 1 ? '' : 's'} · ${sc.total} pts${sc.rare ? ' · an INKFISH! 🖤' : ''}${sc.pairs ? ` · ${sc.pairs} pair${sc.pairs > 1 ? 's' : ''}` : ''}${sc.crowd ? ' · crowd bonus!' : ''}`);
 }
-// right after the frame with the photo in it is drawn: copy it into a polaroid
+// right after the frame with the photo in it is drawn: keep it, full size (the photo frame: the middle of the view)
 function grabPhoto() {
   const sc = LAP.pend; if (!sc) return; LAP.pend = null;
-  const c = document.createElement('canvas'); c.width = 240; c.height = 150;
-  const w = canvas.width * FRAME, h = canvas.height * FRAME;
-  try { c.getContext('2d').drawImage(canvas, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h, 0, 0, 240, 150); } catch {}
-  sc.img = c.toDataURL('image/jpeg', 0.8);
-  drawPhotos();
+  const w = round(canvas.width * FRAME), h = round(canvas.height * FRAME), c = document.createElement('canvas'); c.width = w; c.height = h;
+  try { c.getContext('2d').drawImage(canvas, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h, 0, 0, w, h); } catch {}
+  c.toBlob((b) => { if (b) { sc.img = URL.createObjectURL(b); drawPhotos(); } }, 'image/jpeg', 0.92);
 }
 const shotLines = (s) => [`${s.n} podGAN${s.n === 1 ? '' : 's'}: ${s.base}`, s.crowd ? `crowd bonus: +${s.crowd}` : '', s.pairs ? `${s.pairs} pair${s.pairs > 1 ? 's' : ''}${s.pairs >= 3 ? ' (×2!)' : ''}: +${s.pair}` : '', s.rare ? `inkfish! 🖤 ×${s.rare}` : ''].filter(Boolean);
+// the lap's score: its three best photos
+const best3 = () => [...LAP.shots].sort((a, b) => b.total - a.total).slice(0, 3);
+// the strip in the corner: your last three photos, and how many so far
 function drawPhotos() {
-  phEl.innerHTML = [0, 1, 2].map((k) => { const s = LAP.shots[k]; return s ? `<figure>${s.img ? `<img src="${s.img}">` : '<i></i>'}<figcaption>${s.total} pts</figcaption></figure>` : '<figure class=e><i>📷</i></figure>'; }).join('');
+  const last = LAP.shots.slice(-3);
+  phEl.innerHTML = (LAP.shots.length > 3 ? `<b>📷 ${LAP.shots.length}</b>` : '') + last.map((s) => `<figure>${s.img ? `<img src="${s.img}">` : '<i></i>'}<figcaption>${s.total} pts</figcaption></figure>`).join('');
 }
 
 // ---------------------------------------------------------------- the lap
@@ -877,10 +878,11 @@ function lapStart() {
   if (PL.pod < 0) return;
   const [, , , fx, , fz] = routeAt(0);
   F[YAW] = atan2(fx, -fz); F[PIT] = -0.1; PL.snap = true;
-  Object.assign(LAP, { on: true, t0: F[TIME], d: 0, shots: [], left: SHOTS, pend: null });
+  for (const sc of LAP.shots) if (sc.img) URL.revokeObjectURL(sc.img); // last lap's photos go
+  Object.assign(LAP, { on: true, t0: F[TIME], d: 0, shots: [], pend: null });
   ride(0);
-  resEl.className = ''; drawPhotos();
-  feed('🎞 Look around and take 3 photos this lap: left-click!');
+  galOff(); drawPhotos();
+  feed('🎞 Look around and snap away: left-click! Your 3 best photos score');
 }
 // carries your podGAN along the route
 function ride(dt) {
@@ -892,19 +894,38 @@ function ride(dt) {
   P[j] = x; P[j + 1] = y; P[j + 2] = z; V[j] = fx * SPEED; V[j + 1] = fy * SPEED; V[j + 2] = fz * SPEED;
   H[j] = fx; H[j + 1] = fy * 0.6; H[j + 2] = fz; E.fill(0, j, j + 3);
 }
+// the end of the lap: the mouse is let go and every photo is laid out. Click one to see it big and download it
+const galEl = $('gal');
+let galOpen = false;
 function lapEnd() {
   LAP.on = false;
-  const secs = F[TIME] - LAP.t0, pts = LAP.shots.reduce((a, s) => a + s.total, 0), best = pts > LAP.best;
+  const secs = F[TIME] - LAP.t0, top = best3(), pts = top.reduce((a, s) => a + s.total, 0), best = pts > LAP.best;
   if (best) { LAP.best = pts; try { localStorage.podLapBest = pts; } catch {} }
   sfx(523, 1046, 0.6, 0.25); setTimeout(() => sfx(784, 1568, 0.6, 0.2), 150);
   netSend({ t: 'lap', pts, secs });
-  LAP.next = performance.now() + 15000;
-  resEl.innerHTML = `<h2>Lap done! ${pts} points${best ? ' · new best! 🏆' : ''}</h2>
-    <div class=pics>${LAP.shots.map((s, k) => `<figure>${s.img ? `<img src="${s.img}">` : '<i></i>'}<figcaption><b>Photo ${k + 1}: ${s.total} pts</b>${shotLines(s).map((l) => `<br>${l}`).join('')}</figcaption></figure>`).join('') || '<p>No photos this lap!</p>'}</div>
-    <p class=nx>Lap time ${mmss(secs)} · your best ${LAP.best} pts</p>${boardHtml()}
-    <p class=nx>Click or wait <i>15</i> s for the next lap</p>`;
-  resEl.className = 'v';
+  LAP.lap = (LAP.lap || 0) + 1;
+  galOpen = true; document.exitPointerLock?.();
+  const n = LAP.shots.length;
+  galEl.innerHTML = `<h2>Lap done! ${pts} points${best ? ' · new best! 🏆' : ''}</h2>
+    <p class=sub>${n ? `${n} photo${n > 1 ? 's' : ''} · your 3 best count ⭐ · lap time ${mmss(secs)} · your best ${LAP.best} pts` : 'No photos this lap!'}</p>
+    ${n ? `<div class=big><img><div class=info></div></div>` : ''}
+    <div class=grid>${LAP.shots.map((s, k) => `<figure data-k="${k}"${top.includes(s) ? ' class=top' : ''}><img src="${s.img || ''}"><figcaption>${top.includes(s) ? '⭐ ' : ''}#${s.k} · ${s.total} pts</figcaption></figure>`).join('')}</div>
+    ${boardHtml()}
+    <p class=bt><button id=gnext>Next lap ▶</button></p>`;
+  galEl.querySelectorAll('figure').forEach((f) => f.onclick = () => galPick(+f.dataset.k));
+  $('gnext').onclick = () => { capture(); lapStart(); };
+  if (n) galPick(LAP.shots.indexOf(top[0]));
+  galEl.className = 'v';
 }
+// show photo k big, with its points and a download button
+function galPick(k) {
+  const s = LAP.shots[k]; if (!s) return;
+  galEl.querySelectorAll('figure').forEach((f) => f.classList.toggle('sel', +f.dataset.k === k));
+  galEl.querySelector('.big img').src = s.img || '';
+  galEl.querySelector('.info').innerHTML = `<b>Photo #${s.k}: ${s.total} pts</b>${shotLines(s).map((l) => `<br>${l}`).join('')}
+    <br><a class=dl href="${s.img || '#'}" download="podgarden-lap${LAP.lap}-photo${s.k}.jpg">⬇ Download</a>`;
+}
+function galOff() { galOpen = false; galEl.className = ''; }
 const boardHtml = () => NET.board.length ? `<div class=bd><b>Best laps</b>${NET.board.map(([n, p, s], k) => `<p><span>${k + 1}.</span><span>${esc(n)}</span><span>${p} pts</span><span>${mmss(s)}</span></p>`).join('')}</div>` : '';
 // the banner: gate, clock, photos left, and what the frame would score right now
 let itTxt = '', liveT = 0, live = null;
@@ -912,11 +933,11 @@ function drawIt(dt) {
   if ((liveT -= dt) <= 0 && LAP.on) { liveT = 0.25; live = scoreShot(inShot(true)); }
   let t;
   if (!LAP.on) t = '🎞 Lap done!';
-  else t = `🎞 Lap ${floor(LAP.d / (ROUTE.length * STEP) * 100)}% · ⏱ ${mmss(F[TIME] - LAP.t0)} · 📷 ${LAP.left} left`;
+  else t = `🎞 Lap ${floor(LAP.d / (ROUTE.length * STEP) * 100)}% · ⏱ ${mmss(F[TIME] - LAP.t0)} · 📷 ${LAP.shots.length} taken · best 3: ${best3().reduce((a, s) => a + s.total, 0)} pts`;
   if (t !== itTxt) { itTxt = t; itEl.textContent = t; }
-  const v = LAP.on && LAP.left > 0 && live ? `📷 ${live.n} in frame · ≈${live.total} pts${live.pairs ? ` · ${live.pairs} pair${live.pairs > 1 ? 's' : ''}` : ''}` : '';
+  const v = LAP.on && live ? `📷 ${live.n} in frame · ≈${live.total} pts${live.pairs ? ` · ${live.pairs} pair${live.pairs > 1 ? 's' : ''}` : ''}` : '';
   if (vfEl.dataset.t !== v) { vfEl.dataset.t = v; vfEl.lastChild.textContent = v; }
-  vfEl.className = LAP.on && LAP.left > 0 ? 'v' : '';
+  vfEl.className = LAP.on ? 'v' : '';
   if (LAP.flash > 0 || flEl.style.opacity !== '0') { LAP.flash = max(0, LAP.flash - dt * 3); flEl.style.opacity = LAP.flash.toFixed(2); }
 }
 // Tab: the board
@@ -1021,11 +1042,6 @@ function game(dt) {
     cn[p.pod] = m.c;
   }
   drawIt(dt);
-  if (resEl.className) {
-    const e = resEl.querySelector('i'), left = (LAP.next - performance.now()) / 1000;
-    if (e) e.textContent = max(0, Math.ceil(left));
-    if (left <= 0) lapStart();
-  }
   if ($('sb').className) drawScores();
   if (!NET.online) return;
   if ((NET.sendT -= dt) <= 0 && PL.pod >= 0) {
@@ -1123,10 +1139,10 @@ addEventListener('keydown', (e) => {
   if (menu && e.code !== 'KeyH' && e.code !== 'KeyM') return; sound(); key(e, 1);
 });
 addEventListener('keyup', (e) => { if (e.code === 'Tab') $('sb').className = ''; });
-// left: take a photo (or, after a lap, start the next)
+// left: take a photo
 addEventListener('mousedown', (e) => {
   if (menu || document.pointerLockElement !== canvas) return;
-  if (e.button === 0) { if (resEl.className) lapStart(); else photo(); }
+  if (e.button === 0) photo();
 });
 addEventListener('contextmenu', (e) => { if (!menu) e.preventDefault(); });
 addEventListener('keyup', (e) => key(e, 0));
@@ -1168,7 +1184,8 @@ const go = () => {
 bDive.onclick = go; $('o').onclick = () => ui(true);
 // detail buttons: the current level is lit, the others reload the page with theirs
 $('q').querySelectorAll('button').forEach((b, i) => { if (i === 2 - LV) b.className = 'on'; else b.onclick = () => { keep('abyssal', 2 - i); location.reload(); }; });
-document.addEventListener('pointerlockchange', () => ui(!document.pointerLockElement));
+// (letting the mouse go for the photo gallery doesn't open the menu)
+document.addEventListener('pointerlockchange', () => ui(!document.pointerLockElement && !galOpen));
 
 // draw the first frame and wait for the GPU to finish it (pipelines get compiled on first use) before the reveal
 lookAt(...POSES[0]);

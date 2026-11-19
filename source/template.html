@@ -183,6 +183,26 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 #res figure img, #res figure i { display: block; width: 100%; aspect-ratio: 8 / 5; background: #12303c; object-fit: cover; margin-bottom: .3em; }
 #res .bd { margin: .6em auto 0; max-width: 24em; font-size: .9em; }
 #res .bd p { grid-template-columns: 2em 3fr 1.4fr 1fr; }
+#gal { position: fixed; inset: 3vh 3vw; z-index: 20; display: none; overflow-y: auto; padding: 1.2em 1.6em; border-radius: .8em; background: #03131cf2; color: #dff; font: 15px system-ui, sans-serif; box-shadow: 0 10px 40px #000a; }
+#gal.v { display: block; }
+#gal h2 { margin: 0; text-align: center; font: 900 1.6em system-ui, sans-serif; letter-spacing: .06em; color: #ffd75e; text-transform: uppercase; }
+#gal .sub { text-align: center; margin: .3em 0 .8em; opacity: .8; }
+#gal .big { display: flex; gap: 1.2em; align-items: flex-start; justify-content: center; margin-bottom: 1em; }
+#gal .big img { max-width: min(62vw, 900px); max-height: 52vh; border-radius: .3em; box-shadow: 0 4px 20px #000a; background: #12303c; }
+#gal .info { min-width: 12em; line-height: 1.5; }
+#gal .info b { color: #ffd75e; font-size: 1.15em; }
+#gal .dl, #gal button { display: inline-block; margin-top: .8em; padding: .55em 1.2em; border: 0; border-radius: 2em; background: #2ad1e6; color: #022; font: 800 1em system-ui, sans-serif; text-decoration: none; cursor: pointer; }
+#gal .dl:hover, #gal button:hover { background: #7ff3ff; }
+#gal .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: .7em; }
+#gal figure { margin: 0; padding: .3em .3em .2em; background: #f4f0e6; border-radius: .2em; color: #222; text-align: center; font: 700 .8em system-ui, sans-serif; cursor: pointer; outline: 3px solid transparent; transition: transform .1s; }
+#gal figure:hover { transform: scale(1.04); }
+#gal figure.top { background: #ffe9a3; }
+#gal figure.sel { outline-color: #2ad1e6; }
+#gal figure img { display: block; width: 100%; aspect-ratio: 8 / 5; object-fit: cover; background: #12303c; }
+#gal .bd { margin: 1em auto 0; max-width: 24em; }
+#gal .bd p { display: grid; grid-template-columns: 2em 3fr 1.4fr 1fr; margin: .2em 0; }
+#gal .bt { text-align: center; }
+#ph b { align-self: center; color: #fff; font: 800 1em system-ui, sans-serif; text-shadow: 0 0 6px #000; }
 #fl { position: fixed; inset: 0; background: #fff; pointer-events: none; }
 #res p.nx { display: block; margin-top: .6em; text-align: center; color: #7ff3ff; font-size: .9em; }
 #nm { padding: .8em 1em; border: 0; border-radius: .5em; background: #03131cd9; box-shadow: inset 0 0 0 2px #7ff3ff80; color: #e8fbff;
@@ -205,7 +225,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
       <div id=k>
         <p>
           <i><b>Mouse</b></i>Aim
-          <i><b>Left click</b></i>Take a photo (3 a lap)
+          <i><b>Left click</b></i>Take a photo (as many as you like)
         </p>
         <p>
           <i><b>Tab</b></i>Best laps
@@ -214,7 +234,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
           <i><b>H</b></i>Stats
         </p>
       </div>
-      <p id=bs><b>podGAN Photo Lap:</b> ride the route round the garden, look around, and take 3 photos on the way. Every podGAN in a photo scores by rarity: rainbow 1 · flaming &amp; frozen 3 · phantom 4 · inkfish 30 · krakens +2. Bonuses for a crowd in one shot (6 or more) and for every matching pair (same colour and size).</p>
+      <p id=bs><b>podGAN Photo Lap:</b> ride the route round the garden, look around, and snap as many photos as you like: your 3 best score, and at the end you can download any of them. Every podGAN in a photo scores by rarity: rainbow 1 · flaming &amp; frozen 3 · phantom 4 · inkfish 30 · krakens +2. Bonuses for a crowd in one shot (6 or more) and for every matching pair (same colour and size).</p>
       <p id=h>Hold to jet · slide to aim</p>
     </div>
   </div>
@@ -223,6 +243,7 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 <button id=o aria-label=Menu>≡</button>
 <pre id=i></pre>
 <div id=n></div>
+<div id=gal></div>
 <div id=hud><div id=lbl></div><i id=x></i><p id=itb></p><div id=feed></div><p id=ink></p></div><div id=vf><i></i><i></i><i></i><i></i><span></span></div><div id=ph></div><div id=fl style="opacity:0"></div>
 <div id=sb></div>
 <div id=res></div>
