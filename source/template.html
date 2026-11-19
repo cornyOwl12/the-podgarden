@@ -145,6 +145,9 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
 #sb b { color: #7ff3ff; font-weight: 400; }
 #ink { position: absolute; left: 1.2em; bottom: 1.2em; font: .9em ui-monospace, Consolas, monospace; color: #e8fbff99; text-shadow: 0 1px 4px #000; }
 #ink b { color: #9ff6ff; font-weight: normal; }
+.arw { position: absolute; transform: translate(-50%, -50%); text-align: center; color: #ffd75e; font: 800 .8em system-ui, sans-serif; text-shadow: 0 0 6px #000, 0 0 10px #ffb300; pointer-events: none; }
+.arw b { display: block; font-size: 2.2em; line-height: 1; }
+.arw.it { color: #ff6b6b; text-shadow: 0 0 6px #000, 0 0 10px #ff2a2a; }
 .ping { position: fixed; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px; border-radius: 50%; border: 3px solid #9ff6ff; box-shadow: 0 0 18px #9ff6ff, inset 0 0 12px #9ff6ff; pointer-events: none; animation: ping 1.2s ease-out forwards; }
 @keyframes ping { to { transform: scale(120); opacity: 0; border-width: .2px; } }
 /* end of a round: last one caught first, the winner in gold */
@@ -176,10 +179,9 @@ button:active, a:active { transform: translateY(.1em); filter: brightness(.9); }
       <div id=k>
         <p>
           <i><b>Mouse</b></i>Aim
-          <i><b>Space</b></i>Jet · hold for full jets
           <i><b>Left click</b></i>Jump into a podGAN · catch a player
           <i><b>Left click</b> open water</i>Sonar ping: shows players nearby (every 5 s)
-          <i><b>Right click</b></i>Squirt ink (once a minute)
+          <i><b>Right click</b></i>Squirt ink + jet away fast (once a minute)
         </p>
         <p>
           <i><b>Tab</b></i>Players
